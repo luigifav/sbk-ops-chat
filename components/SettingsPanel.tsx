@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 const DEFAULT_CHIPS = [
   'Como funciona o processo X',
@@ -8,6 +8,41 @@ const DEFAULT_CHIPS = [
   'O que fazer quando Z',
   'Qual o prazo para W',
 ]
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
+const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx']
+
+function readAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsText(file)
+  })
+}
+
+async function parsePdf(arrayBuffer: ArrayBuffer): Promise<string> {
+  const pdfjsLib = await import('pdfjs-dist')
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
+  const pageTexts: string[] = []
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    const text = content.items
+      .map((item) => ('str' in item ? (item as { str: string }).str : ''))
+      .join(' ')
+    pageTexts.push(text)
+  }
+  return pageTexts.join('\n\n')
+}
+
+async function parseDocx(arrayBuffer: ArrayBuffer): Promise<string> {
+  const mammoth = await import('mammoth')
+  const result = await mammoth.extractRawText({ arrayBuffer })
+  return result.value
+}
 
 export default function SettingsPanel() {
   const [systemPrompt, setSystemPrompt] = useState('')
@@ -17,6 +52,9 @@ export default function SettingsPanel() {
   const [savingChips, setSavingChips] = useState(false)
   const [promptMsg, setPromptMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [chipsMsg, setChipsMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [fileLoading, setFileLoading] = useState(false)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     async function load() {
@@ -76,6 +114,46 @@ export default function SettingsPanel() {
     }
   }
 
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // Reset input so the same file can be re-selected after an error
+    e.target.value = ''
+    if (!file) return
+
+    setFileError(null)
+
+    if (file.size > MAX_FILE_SIZE) {
+      setFileError('Arquivo muito grande. Tamanho máximo: 5 MB.')
+      return
+    }
+
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+    if (!SUPPORTED_EXTS.includes(ext)) {
+      setFileError('Tipo de arquivo não suportado. Use PDF, TXT, MD ou DOCX.')
+      return
+    }
+
+    setFileLoading(true)
+    try {
+      let text = ''
+      if (ext === 'txt' || ext === 'md') {
+        text = await readAsText(file)
+      } else if (ext === 'pdf') {
+        const buf = await file.arrayBuffer()
+        text = await parsePdf(buf)
+      } else if (ext === 'docx') {
+        const buf = await file.arrayBuffer()
+        text = await parseDocx(buf)
+      }
+      setSystemPrompt(text)
+    } catch (err) {
+      console.error('File parse error:', err)
+      setFileError('Erro ao processar o arquivo. Tente novamente.')
+    } finally {
+      setFileLoading(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -100,6 +178,51 @@ export default function SettingsPanel() {
           placeholder="Cole aqui a documentação operacional da SBK..."
           className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary resize-y"
         />
+
+        {/* File upload */}
+        <div className="flex items-center gap-2 mt-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.pdf,.docx"
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={fileLoading}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-sm text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            {fileLoading ? (
+              <>
+                <span className="w-3.5 h-3.5 border-2 border-gray-300 border-t-gray-500 rounded-full animate-spin" />
+                Processando…
+              </>
+            ) : (
+              <>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="w-3.5 h-3.5"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                Carregar arquivo
+              </>
+            )}
+          </button>
+          <span className="text-xs text-gray-400">PDF, TXT, MD, DOCX · máx. 5 MB</span>
+        </div>
+        {fileError && (
+          <p className="text-sm text-red-600 mt-1">{fileError}</p>
+        )}
+
         <div className="flex items-center justify-between mt-3">
           <div>
             {promptMsg && (
