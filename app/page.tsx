@@ -3,6 +3,8 @@ import { redirect } from 'next/navigation'
 import { verifyToken } from '@/lib/auth'
 import LoginScreen from '@/components/LoginScreen'
 
+export const dynamic = 'force-dynamic'
+
 interface PageProps {
   searchParams: { admin?: string }
 }
