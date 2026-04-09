@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 
+export const dynamic = 'force-dynamic'
+
 async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   const adminToken = req.cookies.get('sbk_admin_token')?.value
   if (!adminToken) return false
