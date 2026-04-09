@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/prisma'
 import Chat from '@/components/Chat'
 
+export const dynamic = 'force-dynamic'
+
 const DEFAULT_CHIPS = [
   'Como funciona o processo X',
   'Onde encontro Y',

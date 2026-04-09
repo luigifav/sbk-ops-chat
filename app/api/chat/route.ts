@@ -3,6 +3,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 
+export const dynamic = 'force-dynamic'
+
 const BASE_SYSTEM_PROMPT =
   'Você é o assistente operacional da SBK, empresa de Legal Operations. ' +
   'Responda dúvidas dos operadores sobre processos, sistemas e procedimentos internos. ' +
