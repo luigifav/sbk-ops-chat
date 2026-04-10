@@ -1,0 +1,2 @@
+ALTER TABLE "Document"
+  ADD COLUMN IF NOT EXISTS "category" TEXT NOT NULL DEFAULT 'geral';

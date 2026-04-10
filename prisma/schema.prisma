@@ -32,6 +32,7 @@ model Document {
   order           Int             @default(0)
   createdAt       DateTime        @default(now())
   embeddingStatus String          @default("pending")
+  category        String          @default("geral")
   chunks          DocumentChunk[]
 }
 
