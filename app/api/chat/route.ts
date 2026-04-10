@@ -16,6 +16,9 @@ const anthropic = new Anthropic({
 })
 
 export async function POST(req: NextRequest) {
+  // Read operator name from cookie
+  const operatorName = req.cookies.get('sbk_operator_name')?.value ?? 'Anônimo'
+
   // Verify operator auth
   const authToken = req.cookies.get('sbk_auth_token')?.value
   if (!authToken) {
@@ -151,6 +154,7 @@ export async function POST(req: NextRequest) {
                 answer: fullResponse,
                 sessionId: sessionId ?? 'unknown',
                 responseTimeMs,
+                operatorName,
               },
             })
           } catch {
