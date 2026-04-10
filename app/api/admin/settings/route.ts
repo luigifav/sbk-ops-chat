@@ -15,8 +15,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const settings = await prisma.setting.findMany()
-  return NextResponse.json({ settings })
+  try {
+    const settings = await prisma.setting.findMany()
+    return NextResponse.json({ settings })
+  } catch (err) {
+    console.error('[GET /api/admin/settings]', err)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -24,18 +29,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await req.json()
-  const { key, value } = body as { key?: string; value?: string }
+  try {
+    const body = await req.json()
+    const { key, value } = body as { key?: string; value?: string }
 
-  if (!key || value === undefined) {
-    return NextResponse.json({ error: 'Key and value required' }, { status: 400 })
+    if (!key || value === undefined) {
+      return NextResponse.json({ error: 'Key and value required' }, { status: 400 })
+    }
+
+    const setting = await prisma.setting.upsert({
+      where: { key },
+      create: { key, value },
+      update: { value },
+    })
+
+    return NextResponse.json({ setting })
+  } catch (err) {
+    console.error('[POST /api/admin/settings]', err)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-
-  const setting = await prisma.setting.upsert({
-    where: { key },
-    create: { key, value },
-    update: { value },
-  })
-
-  return NextResponse.json({ setting })
 }
