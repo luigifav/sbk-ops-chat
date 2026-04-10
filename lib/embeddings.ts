@@ -12,7 +12,9 @@ export async function embedText(text: string): Promise<number[]> {
     input: [text],
     inputType: 'document',
   })
-  return response.embeddings![0] as number[]
+  const embedding = response.data?.[0]?.embedding
+  if (!embedding) throw new Error('No embedding returned from Voyage AI')
+  return embedding
 }
 
 export async function embedQuery(text: string): Promise<number[]> {
@@ -21,7 +23,9 @@ export async function embedQuery(text: string): Promise<number[]> {
     input: [text],
     inputType: 'query',
   })
-  return response.embeddings![0] as number[]
+  const embedding = response.data?.[0]?.embedding
+  if (!embedding) throw new Error('No embedding returned from Voyage AI')
+  return embedding
 }
 
 export async function embedBatch(texts: string[]): Promise<number[][]> {
@@ -35,7 +39,11 @@ export async function embedBatch(texts: string[]): Promise<number[][]> {
       input: batch,
       inputType: 'document',
     })
-    results.push(...(response.embeddings as number[][]))
+    const embeddings = response.data?.map((d) => d.embedding).filter(Boolean) as number[][]
+    if (embeddings.length !== batch.length) {
+      throw new Error(`Voyage AI returned ${embeddings.length} embeddings for ${batch.length} inputs`)
+    }
+    results.push(...embeddings)
   }
 
   return results
