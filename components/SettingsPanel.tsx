@@ -20,6 +20,7 @@ interface DocumentItem {
   active: boolean
   order: number
   createdAt: string
+  embeddingStatus: string   // 'pending' | 'processing' | 'done' | 'error'
 }
 
 function readAsText(file: File): Promise<string> {
@@ -88,6 +89,63 @@ function FileIcon({ type }: { type: string }) {
     <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-gray-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
       <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
     </svg>
+  )
+}
+
+function EmbeddingBadge({
+  status,
+  onIndex,
+}: {
+  status: string
+  onIndex: () => void
+}) {
+  if (status === 'done') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
+        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+        </svg>
+        Indexado
+      </span>
+    )
+  }
+
+  if (status === 'processing') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+        <span className="w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin" />
+        Indexando…
+      </span>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <button
+        type="button"
+        onClick={onIndex}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors"
+      >
+        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+        </svg>
+        Erro — tentar novamente
+      </button>
+    )
+  }
+
+  // pending (default)
+  return (
+    <button
+      type="button"
+      onClick={onIndex}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-200 hover:bg-yellow-100 transition-colors"
+    >
+      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+        <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+      </svg>
+      Indexar
+    </button>
   )
 }
 
@@ -227,6 +285,32 @@ export default function SettingsPanel() {
     }
   }
 
+  async function triggerEmbed(id: string) {
+    setDocuments((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, embeddingStatus: 'processing' } : d))
+    )
+    try {
+      const res = await fetch('/api/admin/documents/embed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentId: id }),
+      })
+      if (res.ok) {
+        setDocuments((prev) =>
+          prev.map((d) => (d.id === id ? { ...d, embeddingStatus: 'done' } : d))
+        )
+      } else {
+        setDocuments((prev) =>
+          prev.map((d) => (d.id === id ? { ...d, embeddingStatus: 'error' } : d))
+        )
+      }
+    } catch {
+      setDocuments((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, embeddingStatus: 'error' } : d))
+      )
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -303,8 +387,14 @@ export default function SettingsPanel() {
                 <FileIcon type={doc.type} />
 
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{doc.name}</p>
-                  <p className="text-xs text-gray-400">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-gray-900 truncate">{doc.name}</p>
+                    <EmbeddingBadge
+                      status={doc.embeddingStatus}
+                      onIndex={() => triggerEmbed(doc.id)}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">
                     {formatSize(doc.sizeBytes)} · {formatDate(doc.createdAt)}
                   </p>
                 </div>
