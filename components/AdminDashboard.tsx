@@ -10,6 +10,7 @@ interface MessageRecord {
   sessionId: string
   responseTimeMs: number
   createdAt: string
+  operatorName: string
 }
 
 interface Stats {
@@ -236,7 +237,10 @@ export default function AdminDashboard() {
                           {msg.question}
                         </p>
                         <p className="text-xs text-gray-400 mt-0.5">
-                          {formatDate(msg.createdAt)} ·{' '}
+                          <span className="font-medium text-gray-500">{msg.operatorName}</span>
+                          {' · '}
+                          {formatDate(msg.createdAt)}
+                          {' · '}
                           <span className="font-mono">{msg.responseTimeMs}ms</span>
                         </p>
                       </div>
@@ -275,8 +279,10 @@ export default function AdminDashboard() {
                             {msg.answer}
                           </p>
                         </div>
-                        <p className="text-xs text-gray-400 mt-2 font-mono">
-                          Session: {msg.sessionId}
+                        <p className="text-xs text-gray-400 mt-2">
+                          <span className="font-medium">Operador:</span> {msg.operatorName}
+                          {' · '}
+                          <span className="font-mono">Session: {msg.sessionId}</span>
                         </p>
                       </div>
                     )}

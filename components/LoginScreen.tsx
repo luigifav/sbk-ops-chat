@@ -8,6 +8,7 @@ interface LoginScreenProps {
 }
 
 export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
+  const [operatorName, setOperatorName] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -23,7 +24,11 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify(
+          isAdmin
+            ? { password }
+            : { password, operatorName: operatorName.trim() }
+        ),
       })
 
       const data = await res.json()
@@ -60,6 +65,26 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {!isAdmin && (
+              <div>
+                <label
+                  htmlFor="operatorName"
+                  className="block text-sm font-medium text-gray-700 mb-1.5"
+                >
+                  Seu nome
+                </label>
+                <input
+                  id="operatorName"
+                  type="text"
+                  value={operatorName}
+                  onChange={(e) => setOperatorName(e.target.value)}
+                  placeholder="Como você se chama?"
+                  className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+                  autoFocus
+                  required
+                />
+              </div>
+            )}
             <div>
               <label
                 htmlFor="password"
@@ -74,7 +99,7 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Digite a senha"
                 className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-                autoFocus
+                autoFocus={isAdmin}
                 required
               />
             </div>
@@ -87,7 +112,7 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
 
             <button
               type="submit"
-              disabled={loading || !password}
+              disabled={loading || !password || (!isAdmin && !operatorName.trim())}
               className="w-full py-2.5 px-4 bg-primary hover:bg-primary-dark text-white font-medium rounded-lg text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? 'Entrando...' : 'Entrar'}

@@ -36,11 +36,14 @@ export default function Chat({ chips }: ChatProps) {
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [sessionId, setSessionId] = useState('')
+  const [operatorName, setOperatorName] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     setSessionId(getOrCreateSessionId())
+    const match = document.cookie.match(/sbk_operator_name=([^;]+)/)
+    if (match) setOperatorName(decodeURIComponent(match[1]))
   }, [])
 
   useEffect(() => {
@@ -163,7 +166,9 @@ export default function Chat({ chips }: ChatProps) {
           </div>
           <div>
             <h1 className="text-sm font-semibold text-gray-900">SBK Operacional</h1>
-            <p className="text-xs text-gray-500">Assistente de operações</p>
+            <p className="text-xs text-gray-500">
+              {operatorName ? `Olá, ${operatorName}` : 'Assistente de operações'}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-3">

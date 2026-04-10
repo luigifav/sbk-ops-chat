@@ -15,6 +15,7 @@ model Message {
   sessionId      String
   responseTimeMs Int
   createdAt      DateTime @default(now())
+  operatorName   String   @default("Anônimo")
 }
 
 model Setting {
