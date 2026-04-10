@@ -132,9 +132,11 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  // Volume by day
+  // Volume by day (Brazil timezone — en-CA locale gives YYYY-MM-DD format)
   const volumeByDay = messages.reduce<Record<string, number>>((acc, msg) => {
-    const day = msg.createdAt.toISOString().slice(0, 10)
+    const day = msg.createdAt.toLocaleDateString('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+    })
     acc[day] = (acc[day] ?? 0) + 1
     return acc
   }, {})
@@ -176,9 +178,16 @@ export async function GET(req: NextRequest) {
     .sort(([, a], [, b]) => b.total - a.total)
     .map(([name, stats]) => ({ name, ...stats }))
 
-  // Hourly distribution
+  // Hourly distribution (Brazil timezone)
   const hourlyCount = messages.reduce<Record<number, number>>((acc, msg) => {
-    const hour = new Date(msg.createdAt).getHours()
+    const hour = parseInt(
+      msg.createdAt.toLocaleString('en-US', {
+        timeZone: 'America/Sao_Paulo',
+        hour: 'numeric',
+        hour12: false,
+      }),
+      10
+    )
     acc[hour] = (acc[hour] ?? 0) + 1
     return acc
   }, {})
