@@ -17,6 +17,6 @@ model Message {
 }
 
 model Setting {
-  key   String @unique
+  key   String @id
   value String
 }
