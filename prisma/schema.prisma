@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
 }
 
 model Message {
@@ -19,4 +20,15 @@ model Message {
 model Setting {
   key   String @id
   value String
+}
+
+model Document {
+  id        String   @id @default(cuid())
+  name      String
+  content   String
+  type      String
+  sizeBytes Int
+  active    Boolean  @default(true)
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
 }
