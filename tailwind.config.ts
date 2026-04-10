@@ -8,11 +8,21 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Plus Jakarta Sans', 'sans-serif'],
+      },
       colors: {
+        'brand-turquesa': '#01B2AA',
+        'brand-verde-medio': '#2A7A6F',
+        'brand-verde-escuro': '#1F3A3A',
+        'brand-gelo': '#EEF0F4',
+        'brand-cinza-escuro': '#24262D',
+        'brand-cinza-chumbo': '#4B4B4B',
+        // Alias kept for backward-compat (Recharts inline colors, spinners not being redesigned)
         primary: {
-          DEFAULT: '#1D9E75',
-          dark: '#167a5c',
-          light: '#e8f7f3',
+          DEFAULT: '#01B2AA',
+          dark: '#2A7A6F',
+          light: 'rgba(1,178,170,0.1)',
         },
       },
     },

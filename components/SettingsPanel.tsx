@@ -86,7 +86,7 @@ function FileIcon({ type }: { type: string }) {
     )
   }
   return (
-    <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-gray-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+    <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-brand-cinza-chumbo shrink-0" viewBox="0 0 20 20" fill="currentColor">
       <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
     </svg>
   )
@@ -104,7 +104,7 @@ function CategoryBadge({ categoryId }: { categoryId: string }) {
 function EmbeddingBadge({ status, onIndex }: { status: string; onIndex: () => void }) {
   if (status === 'done') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-turquesa/10 text-brand-turquesa border border-brand-turquesa/30">
         <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
           <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
         </svg>
@@ -114,15 +114,15 @@ function EmbeddingBadge({ status, onIndex }: { status: string; onIndex: () => vo
   }
   if (status === 'processing') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
-        <span className="w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-verde-medio/10 text-brand-verde-medio border border-brand-verde-medio/30">
+        <span className="w-3 h-3 border border-brand-turquesa border-t-transparent rounded-full animate-spin" />
         Indexando…
       </span>
     )
   }
   if (status === 'error') {
     return (
-      <button type="button" onClick={onIndex} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors">
+      <button type="button" onClick={onIndex} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/[0.08] text-red-600 border border-red-500/20 hover:bg-red-500/15 transition-colors">
         <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
           <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
         </svg>
@@ -131,7 +131,7 @@ function EmbeddingBadge({ status, onIndex }: { status: string; onIndex: () => vo
     )
   }
   return (
-    <button type="button" onClick={onIndex} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-200 hover:bg-yellow-100 transition-colors">
+    <button type="button" onClick={onIndex} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-cinza-chumbo/[0.08] text-brand-cinza-chumbo border border-brand-cinza-chumbo/20 hover:bg-brand-cinza-chumbo/15 transition-colors">
       <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
         <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
       </svg>
@@ -345,223 +345,244 @@ export default function SettingsPanel() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+        <div className="w-6 h-6 border-2 border-brand-turquesa/30 border-t-brand-turquesa rounded-full animate-spin" />
       </div>
     )
   }
 
   return (
     <div className="space-y-6 max-w-2xl">
-      {/* Documents */}
-      <div className="bg-white rounded-xl border border-gray-100 p-6">
-        <h3 className="font-semibold text-gray-900 mb-1">Documentação operacional</h3>
-        <p className="text-sm text-gray-500 mb-4">
-          Faça upload dos manuais e documentos internos por cliente. Os documentos ativos são
-          injetados no contexto do assistente.
-        </p>
-
-        {/* Category selector for upload */}
-        <div className="mb-3">
-          <p className="text-xs font-medium text-gray-500 mb-2">Categoria do próximo upload</p>
-          <div className="flex flex-wrap gap-2">
-            {CATEGORIES.map((cat) => (
-              <button
-                key={cat.id}
-                type="button"
-                onClick={() => setSelectedCategory(cat.id)}
-                className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-                  selectedCategory === cat.id
-                    ? `${cat.color} ${cat.textColor} ${cat.borderColor} ring-2 ring-offset-1 ring-current`
-                    : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                }`}
-              >
-                {cat.label}
-              </button>
-            ))}
-          </div>
+      {/* ── Documents section ── */}
+      <div className="bg-white rounded-xl overflow-hidden">
+        {/* Card header */}
+        <div className="bg-brand-verde-escuro px-5 py-3.5">
+          <h3 className="font-semibold text-white text-[13px]">Documentação operacional</h3>
+          <p className="text-[11px] text-brand-turquesa mt-0.5">
+            Faça upload dos manuais e documentos internos por cliente
+          </p>
         </div>
 
-        {/* Drag and drop zone */}
-        <div
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onClick={() => !uploading && fileInputRef.current?.click()}
-          className={`relative border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors mb-4 ${
-            dragOver
-              ? 'border-primary bg-primary/5'
-              : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-          } ${uploading ? 'pointer-events-none opacity-60' : ''}`}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".txt,.md,.pdf,.docx"
-            onChange={handleFileInput}
-            className="hidden"
-          />
-          {uploading ? (
-            <div className="flex flex-col items-center gap-2">
-              <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-              <p className="text-sm text-gray-500">Processando arquivo…</p>
+        <div className="p-5">
+          {/* Category selector for upload */}
+          <div className="mb-4">
+            <p className="text-[11px] font-semibold text-brand-cinza-chumbo uppercase tracking-wider mb-2">
+              Categoria do próximo upload
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {CATEGORIES.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                    selectedCategory === cat.id
+                      ? `${cat.color} ${cat.textColor} ${cat.borderColor} ring-2 ring-offset-1 ring-current`
+                      : 'bg-brand-gelo text-brand-cinza-chumbo border-brand-verde-escuro/10 hover:border-brand-verde-escuro/25'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
             </div>
-          ) : (
-            <div className="flex flex-col items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" className={`w-8 h-8 ${dragOver ? 'text-primary' : 'text-gray-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-              </svg>
-              <div>
-                <p className="text-sm font-medium text-gray-700">
-                  {dragOver ? 'Solte o arquivo aqui' : 'Arraste um arquivo ou clique para selecionar'}
-                </p>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  PDF, TXT, MD, DOCX · máx. 5 MB · será salvo em{' '}
-                  <span className={`font-medium ${getCategoryById(selectedCategory).textColor}`}>
-                    {getCategoryById(selectedCategory).label}
-                  </span>
-                </p>
+          </div>
+
+          {/* Drag and drop zone */}
+          <div
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onClick={() => !uploading && fileInputRef.current?.click()}
+            className={`relative border-[1.5px] border-dashed rounded-xl p-6 text-center cursor-pointer transition-all mb-4 ${
+              dragOver
+                ? 'border-brand-turquesa bg-brand-turquesa/[0.04]'
+                : 'border-brand-turquesa/40 hover:border-brand-turquesa hover:bg-brand-turquesa/[0.02]'
+            } ${uploading ? 'pointer-events-none opacity-60' : ''}`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.md,.pdf,.docx"
+              onChange={handleFileInput}
+              className="hidden"
+            />
+            {uploading ? (
+              <div className="flex flex-col items-center gap-2">
+                <div className="w-6 h-6 border-2 border-brand-turquesa/30 border-t-brand-turquesa rounded-full animate-spin" />
+                <p className="text-sm text-brand-cinza-chumbo">Processando arquivo…</p>
               </div>
+            ) : (
+              <div className="flex flex-col items-center gap-2">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className={`w-8 h-8 ${dragOver ? 'text-brand-turquesa' : 'text-brand-turquesa/40'}`}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <div>
+                  <p className="text-sm font-semibold text-brand-turquesa">
+                    {dragOver ? 'Solte o arquivo aqui' : 'Arraste um arquivo ou clique para selecionar'}
+                  </p>
+                  <p className="text-[11px] text-brand-cinza-chumbo mt-0.5">
+                    PDF, TXT, MD, DOCX · máx. 5 MB · será salvo em{' '}
+                    <span className={`font-medium ${getCategoryById(selectedCategory).textColor}`}>
+                      {getCategoryById(selectedCategory).label}
+                    </span>
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {fileError && (
+            <p className="text-sm text-red-600 mb-3">{fileError}</p>
+          )}
+
+          {/* Filter tabs */}
+          {documents.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-4">
+              <button
+                type="button"
+                onClick={() => setActiveFilter('all')}
+                className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+                  activeFilter === 'all'
+                    ? 'bg-brand-verde-escuro text-white border-brand-verde-escuro'
+                    : 'bg-brand-gelo text-brand-cinza-chumbo border-brand-verde-escuro/10 hover:border-brand-verde-escuro/25'
+                }`}
+              >
+                Todos ({documents.length})
+              </button>
+              {CATEGORIES.filter((cat) => countByCategory[cat.id] > 0).map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => setActiveFilter(cat.id)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                    activeFilter === cat.id
+                      ? `${cat.color} ${cat.textColor} ${cat.borderColor}`
+                      : 'bg-brand-gelo text-brand-cinza-chumbo border-brand-verde-escuro/10 hover:border-brand-verde-escuro/25'
+                  }`}
+                >
+                  {cat.label} ({countByCategory[cat.id]})
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Document list grouped by category */}
+          {documents.length === 0 ? (
+            <p className="text-sm text-brand-cinza-chumbo text-center py-6">
+              Nenhum documento carregado ainda.
+            </p>
+          ) : Object.keys(groupedDocs).length === 0 ? (
+            <p className="text-sm text-brand-cinza-chumbo text-center py-6">
+              Nenhum documento nesta categoria.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              {CATEGORIES.filter((cat) => groupedDocs[cat.id]).map((cat) => (
+                <div key={cat.id}>
+                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg mb-2 ${cat.color}`}>
+                    <span className={`text-xs font-semibold ${cat.textColor}`}>{cat.label}</span>
+                    <span className={`text-xs ${cat.textColor} opacity-60`}>
+                      {groupedDocs[cat.id].length} {groupedDocs[cat.id].length === 1 ? 'arquivo' : 'arquivos'}
+                    </span>
+                  </div>
+                  <div className="space-y-2 pl-1">
+                    {groupedDocs[cat.id].map((doc) => (
+                      <div
+                        key={doc.id}
+                        className="flex items-center gap-3 px-4 py-3 border border-brand-verde-escuro/[0.06] rounded-lg hover:bg-brand-gelo hover:border-brand-turquesa/20 transition-all"
+                      >
+                        <FileIcon type={doc.type} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-brand-verde-escuro truncate">{doc.name}</p>
+                            <EmbeddingBadge
+                              status={doc.embeddingStatus}
+                              onIndex={() => triggerEmbed(doc.id)}
+                            />
+                          </div>
+                          <p className="text-xs text-brand-cinza-chumbo mt-0.5">
+                            {formatSize(doc.sizeBytes)} · {formatDate(doc.createdAt)}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleActive(doc.id, doc.active)}
+                          aria-label={doc.active ? 'Desativar' : 'Ativar'}
+                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                            doc.active ? 'bg-brand-turquesa' : 'bg-brand-cinza-chumbo/20'
+                          }`}
+                        >
+                          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform duration-200 ${doc.active ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteDocument(doc.id)}
+                          aria-label="Remover"
+                          className="p-1 text-brand-cinza-chumbo/40 hover:text-red-500 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
-
-        {fileError && <p className="text-sm text-red-600 mb-3">{fileError}</p>}
-
-        {/* Filter tabs */}
-        {documents.length > 0 && (
-          <div className="flex flex-wrap gap-1 mb-4">
-            <button
-              type="button"
-              onClick={() => setActiveFilter('all')}
-              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-                activeFilter === 'all'
-                  ? 'bg-gray-900 text-white border-gray-900'
-                  : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-              }`}
-            >
-              Todos ({documents.length})
-            </button>
-            {CATEGORIES.filter((cat) => countByCategory[cat.id] > 0).map((cat) => (
-              <button
-                key={cat.id}
-                type="button"
-                onClick={() => setActiveFilter(cat.id)}
-                className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-                  activeFilter === cat.id
-                    ? `${cat.color} ${cat.textColor} ${cat.borderColor}`
-                    : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                }`}
-              >
-                {cat.label} ({countByCategory[cat.id]})
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Document list grouped by category */}
-        {documents.length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-6">
-            Nenhum documento carregado ainda.
-          </p>
-        ) : Object.keys(groupedDocs).length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-6">
-            Nenhum documento nesta categoria.
-          </p>
-        ) : (
-          <div className="space-y-4">
-            {CATEGORIES.filter((cat) => groupedDocs[cat.id]).map((cat) => (
-              <div key={cat.id}>
-                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg mb-2 ${cat.color}`}>
-                  <span className={`text-xs font-semibold ${cat.textColor}`}>{cat.label}</span>
-                  <span className={`text-xs ${cat.textColor} opacity-60`}>
-                    {groupedDocs[cat.id].length} {groupedDocs[cat.id].length === 1 ? 'arquivo' : 'arquivos'}
-                  </span>
-                </div>
-                <div className="space-y-2 pl-1">
-                  {groupedDocs[cat.id].map((doc) => (
-                    <div
-                      key={doc.id}
-                      className="flex items-center gap-3 px-4 py-3 border border-gray-100 rounded-lg hover:bg-gray-50 transition-colors"
-                    >
-                      <FileIcon type={doc.type} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-sm font-medium text-gray-900 truncate">{doc.name}</p>
-                          <EmbeddingBadge
-                            status={doc.embeddingStatus}
-                            onIndex={() => triggerEmbed(doc.id)}
-                          />
-                        </div>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {formatSize(doc.sizeBytes)} · {formatDate(doc.createdAt)}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => toggleActive(doc.id, doc.active)}
-                        aria-label={doc.active ? 'Desativar' : 'Ativar'}
-                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                          doc.active ? 'bg-green-500' : 'bg-gray-200'
-                        }`}
-                      >
-                        <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform duration-200 ${doc.active ? 'translate-x-4' : 'translate-x-0'}`} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteDocument(doc.id)}
-                        aria-label="Remover"
-                        className="p-1 text-gray-300 hover:text-red-500 transition-colors"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* Quick Chips */}
-      <div className="bg-white rounded-xl border border-gray-100 p-6">
-        <h3 className="font-semibold text-gray-900 mb-1">Sugestões rápidas</h3>
-        <p className="text-sm text-gray-500 mb-4">
-          Configure as perguntas sugeridas exibidas na tela inicial do chat.
-        </p>
-        <div className="space-y-2">
-          {chips.map((chip, i) => (
-            <input
-              key={i}
-              type="text"
-              value={chip}
-              onChange={(e) => {
-                const updated = [...chips]
-                updated[i] = e.target.value
-                setChips(updated)
-              }}
-              placeholder={`Sugestão ${i + 1}`}
-              className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
-            />
-          ))}
+      {/* ── Quick Chips section ── */}
+      <div className="bg-white rounded-xl overflow-hidden">
+        {/* Card header */}
+        <div className="bg-brand-verde-escuro px-5 py-3.5">
+          <h3 className="font-semibold text-white text-[13px]">Sugestões rápidas</h3>
+          <p className="text-[11px] text-brand-turquesa mt-0.5">
+            Configure as perguntas sugeridas na tela inicial do chat
+          </p>
         </div>
-        <div className="flex items-center justify-between mt-3">
-          <div>
-            {chipsMsg && (
-              <p className={`text-sm ${chipsMsg.ok ? 'text-green-600' : 'text-red-600'}`}>
-                {chipsMsg.text}
-              </p>
-            )}
+
+        <div className="p-5">
+          <div className="space-y-2">
+            {chips.map((chip, i) => (
+              <input
+                key={i}
+                type="text"
+                value={chip}
+                onChange={(e) => {
+                  const updated = [...chips]
+                  updated[i] = e.target.value
+                  setChips(updated)
+                }}
+                placeholder={`Sugestão ${i + 1}`}
+                className="w-full px-3 py-2.5 border border-[#D8DCE6] bg-[#F8F9FB] rounded-lg text-sm text-brand-verde-escuro placeholder:text-brand-cinza-chumbo/50 focus:outline-none focus:border-brand-turquesa focus:shadow-[0_0_0_3px_rgba(1,178,170,0.1)] transition-all"
+              />
+            ))}
           </div>
-          <button
-            onClick={saveChips}
-            disabled={savingChips}
-            className="px-4 py-2 bg-primary hover:bg-primary-dark text-white text-sm font-medium rounded-lg disabled:opacity-50 transition-colors"
-          >
-            {savingChips ? 'Salvando...' : 'Salvar sugestões'}
-          </button>
+          <div className="flex items-center justify-between mt-4">
+            <div>
+              {chipsMsg && (
+                <p className={`text-sm ${chipsMsg.ok ? 'text-brand-turquesa' : 'text-red-600'}`}>
+                  {chipsMsg.text}
+                </p>
+              )}
+            </div>
+            <button
+              onClick={saveChips}
+              disabled={savingChips}
+              className="px-4 py-2 bg-brand-turquesa hover:bg-brand-verde-medio hover:scale-[1.01] text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-all"
+            >
+              {savingChips ? 'Salvando...' : 'Salvar sugestões'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
