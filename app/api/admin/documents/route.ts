@@ -82,9 +82,69 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'name, content, type and sizeBytes are required' }, { status: 400 })
     }
 
+    const manualCategory = (category as string) ?? 'geral'
+    let resolvedCategory = manualCategory
+
+    // Only auto-classify if admin left it as 'geral' (didn't manually pick)
+    if (manualCategory === 'geral') {
+      const VALID_CATEGORIES = [
+        'bradesco',
+        'agibank',
+        'eagle',
+        'zurich',
+        'geral',
+        'processos-internos',
+      ]
+
+      try {
+        const Anthropic = (await import('@anthropic-ai/sdk')).default
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
+
+        const excerpt = content.slice(0, 2000)
+
+        const classifyResponse = await anthropic.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 20,
+          messages: [
+            {
+              role: 'user',
+              content: `Você é um classificador de documentos internos da SBK Legal Operations.
+
+Categorias disponíveis:
+- bradesco: documentos relacionados ao cliente Bradesco
+- agibank: documentos relacionados ao cliente Agibank
+- eagle: documentos relacionados ao cliente Eagle
+- zurich: documentos relacionados ao cliente Zurich
+- processos-internos: manuais, procedimentos e processos internos da SBK
+- geral: documentos que se aplicam a múltiplos clientes ou não se encaixam nas categorias acima
+
+Nome do arquivo: ${name}
+
+Trecho do conteúdo:
+${excerpt}
+
+Responda APENAS com o id da categoria, sem explicação, sem pontuação. Uma palavra só.`,
+            },
+          ],
+        })
+
+        const suggested =
+          classifyResponse.content[0].type === 'text'
+            ? classifyResponse.content[0].text.trim().toLowerCase()
+            : 'geral'
+
+        if (VALID_CATEGORIES.includes(suggested)) {
+          resolvedCategory = suggested
+        }
+      } catch (err) {
+        console.error('[documents/route] Auto-classify failed, using default:', err)
+        // Keep resolvedCategory as 'geral'
+      }
+    }
+
     const count = await prisma.document.count()
     const document = await prisma.document.create({
-      data: { name, content, type, sizeBytes, order: count, category: category ?? 'geral' },
+      data: { name, content, type, sizeBytes, order: count, category: resolvedCategory },
     })
     const embedUrl = new URL('/api/admin/documents/embed', req.url).toString()
     fetch(embedUrl, {
