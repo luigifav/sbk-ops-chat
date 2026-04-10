@@ -2,16 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --brand-turquesa: #01B2AA;
+  --brand-verde-medio: #2A7A6F;
+  --brand-verde-escuro: #1F3A3A;
+  --brand-gelo: #EEF0F4;
+  --brand-cinza-escuro: #24262D;
+  --brand-cinza-chumbo: #4B4B4B;
+}
+
 @layer base {
   body {
-    @apply bg-gray-50 text-gray-900;
+    background-color: #EEF0F4;
+    /* Noise texture baked into SVG at 0.025 opacity — tiles seamlessly, no z-index concerns */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+    background-repeat: repeat;
+    background-size: 200px 200px;
+    color: #1F3A3A;
+    font-family: 'Plus Jakarta Sans', sans-serif;
   }
 }
+
 
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: #d1d5db transparent;
+    scrollbar-color: rgba(1, 178, 170, 0.25) transparent;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
@@ -23,11 +39,12 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: #d1d5db;
+    background-color: rgba(1, 178, 170, 0.25);
     border-radius: 3px;
   }
 }
 
+/* ── Keyframe animations ── */
 @keyframes blink {
   0%,
   100% {
@@ -38,6 +55,81 @@
   }
 }
 
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ── Animation utility classes ── */
 .animate-blink {
   animation: blink 1s step-end infinite;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.4s ease forwards;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease forwards;
+}
+
+.animate-slide-in-left {
+  animation: slideInLeft 0.5s ease forwards;
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 0.5s ease forwards;
+}
+
+.anim-delay-100 {
+  animation-delay: 100ms;
+}
+
+.anim-delay-200 {
+  animation-delay: 200ms;
+}
+
+.anim-delay-300 {
+  animation-delay: 300ms;
+}
+
+.anim-delay-400 {
+  animation-delay: 400ms;
 }
