@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import SettingsPanel from './SettingsPanel'
 import OperatorsPanel from './OperatorsPanel'
+import SbkLogo from './SbkLogo'
 import {
   BarChart,
   Bar,
@@ -78,22 +79,6 @@ interface AnalyticsMessage {
   responseTimeMs: number
 }
 
-// Shared SBK icon for admin header
-function SbkIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="sbk-admin-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#01B2AA" />
-          <stop offset="100%" stopColor="#1F3A3A" />
-        </linearGradient>
-      </defs>
-      <rect x="1" y="9.5" width="14" height="3.5" rx="1" fill="url(#sbk-admin-g)" opacity="0.4" transform="rotate(-5 8 11.25)" />
-      <rect x="1" y="6" width="14" height="3.5" rx="1" fill="url(#sbk-admin-g)" opacity="0.65" transform="rotate(-5 8 7.75)" />
-      <rect x="1" y="2.5" width="14" height="3.5" rx="1" fill="url(#sbk-admin-g)" opacity="0.95" />
-    </svg>
-  )
-}
 
 function AnalyticsPanel() {
   type AnalyticsPeriod = 'today' | '7days' | '30days' | 'all'
@@ -436,11 +421,10 @@ export default function AdminDashboard() {
         style={{ height: '56px' }}
       >
         <div className="max-w-6xl mx-auto h-full flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <SbkIcon />
-            <div>
-              <h1 className="text-sm font-semibold text-white leading-none">SBK Operacional</h1>
-              <p className="text-[11px] text-brand-turquesa mt-0.5">Painel administrativo</p>
+          <div className="flex items-center gap-3">
+            <SbkLogo color="#FFFFFF" width={88} height={30} />
+            <div className="border-l border-white/20 pl-3">
+              <p className="text-[11px] text-brand-turquesa leading-none">Painel administrativo</p>
             </div>
           </div>
           <div className="flex items-center gap-4">

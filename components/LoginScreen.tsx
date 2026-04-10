@@ -2,25 +2,10 @@
 
 import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
+import SbkLogo from './SbkLogo'
 
 interface LoginScreenProps {
   isAdmin?: boolean
-}
-
-function SbkLogoIcon({ size = 24 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="sbk-login-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#01B2AA" />
-          <stop offset="100%" stopColor="#1F3A3A" />
-        </linearGradient>
-      </defs>
-      <rect x="2" y="15" width="20" height="5" rx="1.5" fill="url(#sbk-login-g)" opacity="0.35" transform="rotate(-6 12 17.5)" />
-      <rect x="2" y="10" width="20" height="5" rx="1.5" fill="url(#sbk-login-g)" opacity="0.6" transform="rotate(-6 12 12.5)" />
-      <rect x="2" y="5" width="20" height="5" rx="1.5" fill="url(#sbk-login-g)" opacity="0.9" transform="rotate(-6 12 7.5)" />
-    </svg>
-  )
 }
 
 function DecorativeBg() {
@@ -150,9 +135,9 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
         <DecorativeBg />
 
         {/* Logo */}
-        <div className="relative flex items-center gap-3 z-10">
-          <SbkLogoIcon size={28} />
-          <span className="text-white font-semibold text-sm tracking-wide">SBK Operacional</span>
+        <div className="relative z-10">
+          <SbkLogo color="#FFFFFF" width={128} height={43} />
+          <p className="text-white/50 text-[11px] mt-1 tracking-wide">Operacional</p>
         </div>
 
         {/* Headline — desktop only */}
@@ -183,9 +168,8 @@ export default function LoginScreen({ isAdmin = false }: LoginScreenProps) {
       <div className="flex-1 md:w-[45%] bg-brand-gelo flex items-center justify-center p-8 md:p-16 animate-fade-in">
         <div className="w-full max-w-sm">
           {/* Mobile logo */}
-          <div className="flex items-center gap-2 mb-8 md:hidden">
-            <SbkLogoIcon size={20} />
-            <span className="text-brand-verde-escuro font-semibold text-sm">SBK Operacional</span>
+          <div className="mb-8 md:hidden">
+            <SbkLogo color="#1F3A3A" width={100} height={34} />
           </div>
 
           <h2 className="text-2xl font-semibold text-brand-verde-escuro mb-1.5">
