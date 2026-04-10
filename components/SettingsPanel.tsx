@@ -9,8 +9,8 @@ const DEFAULT_CHIPS = [
   'Qual o prazo para W',
 ]
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
-const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx']
+const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
+const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx', 'xls', 'xlsx']
 
 interface DocumentItem {
   id: string
@@ -53,6 +53,16 @@ async function parseDocx(arrayBuffer: ArrayBuffer): Promise<string> {
   const mammoth = await import('mammoth')
   const result = await mammoth.extractRawText({ arrayBuffer })
   return result.value
+}
+
+async function parseXlsx(arrayBuffer: ArrayBuffer): Promise<string> {
+  const XLSX = await import('xlsx')
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+  return workbook.SheetNames.map((name: string) => {
+    const sheet = workbook.Sheets[name]
+    const csv = XLSX.utils.sheet_to_csv(sheet)
+    return `## Aba: ${name}\n${csv}`
+  }).join('\n\n')
 }
 
 function formatSize(bytes: number): string {
@@ -217,13 +227,13 @@ export default function SettingsPanel() {
     setFileError(null)
 
     if (file.size > MAX_FILE_SIZE) {
-      setFileError('Arquivo muito grande. Tamanho máximo: 5 MB.')
+      setFileError('Arquivo muito grande. Tamanho máximo: 20 MB.')
       return
     }
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
     if (!SUPPORTED_EXTS.includes(ext)) {
-      setFileError('Tipo de arquivo não suportado. Use PDF, TXT, MD ou DOCX.')
+      setFileError('Tipo de arquivo não suportado. Use PDF, TXT, MD, DOCX, XLS ou XLSX.')
       return
     }
 
@@ -238,6 +248,9 @@ export default function SettingsPanel() {
       } else if (ext === 'docx') {
         const buf = await file.arrayBuffer()
         text = await parseDocx(buf)
+      } else if (ext === 'xls' || ext === 'xlsx') {
+        const buf = await file.arrayBuffer()
+        text = await parseXlsx(buf)
       }
 
       const res = await fetch('/api/admin/documents', {
@@ -334,7 +347,7 @@ export default function SettingsPanel() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".txt,.md,.pdf,.docx"
+            accept=".txt,.md,.pdf,.docx,.xls,.xlsx"
             onChange={handleFileUpload}
             className="hidden"
           />
@@ -367,7 +380,7 @@ export default function SettingsPanel() {
               </>
             )}
           </button>
-          <span className="text-xs text-gray-400">PDF, TXT, MD, DOCX · máx. 5 MB</span>
+          <span className="text-xs text-gray-400">PDF, TXT, MD, DOCX, XLS, XLSX · máx. 20 MB</span>
         </div>
 
         {fileError && <p className="text-sm text-red-600 mb-3">{fileError}</p>}
