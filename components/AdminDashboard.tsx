@@ -2,6 +2,18 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import SettingsPanel from './SettingsPanel'
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+} from 'recharts'
 
 interface MessageRecord {
   id: string
@@ -21,13 +33,314 @@ interface Stats {
 }
 
 type Period = 'today' | '7days' | '30days' | 'all'
-type Tab = 'messages' | 'settings'
+type Tab = 'messages' | 'analytics' | 'settings'
 
 const PERIOD_LABELS: Record<Period, string> = {
   today: 'Hoje',
   '7days': '7 dias',
   '30days': '30 dias',
   all: 'Todos',
+}
+
+const THEME_COLORS = [
+  '#1D9E75',
+  '#3B82F6',
+  '#8B5CF6',
+  '#F59E0B',
+  '#EF4444',
+  '#06B6D4',
+  '#10B981',
+  '#F97316',
+  '#6366F1',
+  '#EC4899',
+]
+
+interface AnalyticsSummary {
+  totalMessages: number
+  avgResponseMs: number
+  uniqueOperators: number
+  topTheme: string
+}
+
+interface OperatorStat {
+  name: string
+  total: number
+  avgResponseMs: number
+}
+
+interface AnalyticsMessage {
+  id: string
+  question: string
+  operatorName: string
+  theme: string | null
+  createdAt: string
+  responseTimeMs: number
+}
+
+function AnalyticsPanel() {
+  type AnalyticsPeriod = 'today' | '7days' | '30days' | 'all'
+
+  const ANALYTICS_PERIOD_LABELS: Record<AnalyticsPeriod, string> = {
+    today: 'Hoje',
+    '7days': '7 dias',
+    '30days': '30 dias',
+    all: 'Todos',
+  }
+
+  const [period, setPeriod] = useState<AnalyticsPeriod>('30days')
+  const [selectedOperator, setSelectedOperator] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
+  const [volumeData, setVolumeData] = useState<{ date: string; perguntas: number }[]>([])
+  const [themeData, setThemeData] = useState<{ theme: string; count: number }[]>([])
+  const [operatorData, setOperatorData] = useState<OperatorStat[]>([])
+  const [hourlyData, setHourlyData] = useState<{ hora: string; perguntas: number }[]>([])
+  const [operators, setOperators] = useState<{ name: string; total: number }[]>([])
+  const [messages, setMessages] = useState<AnalyticsMessage[]>([])
+
+  const fetchAnalytics = useCallback(async () => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ period })
+      if (selectedOperator) params.set('operator', selectedOperator)
+      const res = await fetch(`/api/admin/analytics?${params}`)
+      if (res.ok) {
+        const data = await res.json()
+        setSummary(data.summary)
+        setVolumeData(data.volumeChartData)
+        setThemeData(data.themeChartData)
+        setOperatorData(data.operatorChartData)
+        setHourlyData(data.hourlyChartData)
+        setMessages(data.messages)
+        setOperators(data.operators)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [period, selectedOperator])
+
+  useEffect(() => {
+    fetchAnalytics()
+  }, [fetchAnalytics])
+
+  function handleExportCsv() {
+    const params = new URLSearchParams({ period, export: 'csv' })
+    if (selectedOperator) params.set('operator', selectedOperator)
+    window.location.href = `/api/admin/analytics?${params}`
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3 items-center justify-between">
+        <div className="flex flex-wrap gap-2 items-center">
+          {/* Period */}
+          <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
+            {(Object.keys(ANALYTICS_PERIOD_LABELS) as AnalyticsPeriod[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => setPeriod(p)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  period === p
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {ANALYTICS_PERIOD_LABELS[p]}
+              </button>
+            ))}
+          </div>
+
+          {/* Operator filter */}
+          <select
+            value={selectedOperator}
+            onChange={(e) => setSelectedOperator(e.target.value)}
+            className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/30"
+          >
+            <option value="">Todos os operadores</option>
+            {operators.map((op) => (
+              <option key={op.name ?? 'anon'} value={op.name ?? ''}>
+                {op.name ?? 'Anônimo'} ({op.total})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          onClick={handleExportCsv}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+        >
+          <svg
+            className="w-3.5 h-3.5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+            />
+          </svg>
+          Exportar CSV
+        </button>
+      </div>
+
+      {/* Summary cards */}
+      {summary && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {[
+            { label: 'Perguntas', value: summary.totalMessages.toLocaleString('pt-BR') },
+            { label: 'Tempo médio', value: `${(summary.avgResponseMs / 1000).toFixed(1)}s` },
+            { label: 'Operadores', value: summary.uniqueOperators },
+            { label: 'Tema mais comum', value: summary.topTheme },
+          ].map((card) => (
+            <div key={card.label} className="bg-white rounded-xl border border-gray-100 p-4">
+              <p className="text-xs text-gray-500 mb-1">{card.label}</p>
+              <p className="text-lg font-bold text-gray-900 truncate">{card.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Volume over time */}
+      <div className="bg-white rounded-xl border border-gray-100 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-4">Volume de perguntas por dia</h3>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={volumeData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+            <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+            <Tooltip />
+            <Line
+              type="monotone"
+              dataKey="perguntas"
+              stroke="#1D9E75"
+              strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 4 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Theme + Hourly side by side */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Theme distribution */}
+        <div className="bg-white rounded-xl border border-gray-100 p-5">
+          <h3 className="text-sm font-semibold text-gray-900 mb-4">Perguntas por tema</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={themeData} layout="vertical">
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+              <YAxis
+                type="category"
+                dataKey="theme"
+                tick={{ fontSize: 10 }}
+                width={120}
+              />
+              <Tooltip />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                {themeData.map((_, index) => (
+                  <Cell key={index} fill={THEME_COLORS[index % THEME_COLORS.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Hourly distribution */}
+        <div className="bg-white rounded-xl border border-gray-100 p-5">
+          <h3 className="text-sm font-semibold text-gray-900 mb-4">Horário de pico</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={hourlyData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="hora" tick={{ fontSize: 10 }} interval={3} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip />
+              <Bar dataKey="perguntas" fill="#3B82F6" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Operator ranking */}
+      <div className="bg-white rounded-xl border border-gray-100 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-4">Atividade por operador</h3>
+        <ResponsiveContainer width="100%" height={Math.max(operatorData.length * 40, 120)}>
+          <BarChart data={operatorData} layout="vertical">
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" horizontal={false} />
+            <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+            <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={100} />
+            <Tooltip
+              formatter={(value, name) =>
+                name === 'total'
+                  ? [`${value} perguntas`, 'Total']
+                  : [`${value}ms`, 'Tempo médio']
+              }
+            />
+            <Bar dataKey="total" fill="#1D9E75" radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Recent messages table */}
+      <div className="bg-white rounded-xl border border-gray-100 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-4">
+          Perguntas recentes
+          {selectedOperator && (
+            <span className="ml-2 text-xs font-normal text-gray-400">— {selectedOperator}</span>
+          )}
+        </h3>
+        {messages.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-6">Nenhuma pergunta encontrada.</p>
+        ) : (
+          <div className="space-y-2">
+            {messages.slice(0, 50).map((msg) => (
+              <div
+                key={msg.id}
+                className="flex items-start gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-gray-800 truncate">{msg.question}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    <span className="font-medium text-gray-500">
+                      {msg.operatorName ?? 'Anônimo'}
+                    </span>
+                    {' · '}
+                    {msg.theme && (
+                      <>
+                        <span className="text-primary">{msg.theme}</span>
+                        {' · '}
+                      </>
+                    )}
+                    {new Date(msg.createdAt).toLocaleString('pt-BR', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </p>
+                </div>
+                <span className="text-xs text-gray-400 font-mono shrink-0">
+                  {msg.responseTimeMs}ms
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function AdminDashboard() {
@@ -141,7 +454,7 @@ export default function AdminDashboard() {
         {/* Tabs */}
         <div className="border-b border-gray-200 mb-6">
           <div className="flex gap-6">
-            {(['messages', 'settings'] as Tab[]).map((tab) => (
+            {(['messages', 'analytics', 'settings'] as Tab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -151,7 +464,7 @@ export default function AdminDashboard() {
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {tab === 'messages' ? 'Mensagens' : 'Configurações'}
+                {tab === 'messages' ? 'Mensagens' : tab === 'analytics' ? 'Analytics' : 'Configurações'}
               </button>
             ))}
           </div>
@@ -295,6 +608,9 @@ export default function AdminDashboard() {
 
         {/* Settings Tab */}
         {activeTab === 'settings' && <SettingsPanel />}
+
+        {/* Analytics Tab */}
+        {activeTab === 'analytics' && <AnalyticsPanel />}
       </div>
     </div>
   )

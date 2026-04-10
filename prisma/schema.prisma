@@ -16,6 +16,7 @@ model Message {
   responseTimeMs Int
   createdAt      DateTime @default(now())
   operatorName   String   @default("Anônimo")
+  theme          String?
 }
 
 model Setting {
