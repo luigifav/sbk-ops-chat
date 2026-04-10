@@ -53,6 +53,7 @@ export async function GET(req: NextRequest) {
         order: true,
         createdAt: true,
         embeddingStatus: true,
+        category: true,
       },
     })
     return NextResponse.json({ documents })
@@ -69,11 +70,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
-    const { name, content, type, sizeBytes } = body as {
+    const { name, content, type, sizeBytes, category } = body as {
       name?: string
       content?: string
       type?: string
       sizeBytes?: number
+      category?: string
     }
 
     if (!name || !content || !type || sizeBytes === undefined) {
@@ -82,7 +84,7 @@ export async function POST(req: NextRequest) {
 
     const count = await prisma.document.count()
     const document = await prisma.document.create({
-      data: { name, content, type, sizeBytes, order: count },
+      data: { name, content, type, sizeBytes, order: count, category: category ?? 'geral' },
     })
     const embedUrl = new URL('/api/admin/documents/embed', req.url).toString()
     fetch(embedUrl, {
