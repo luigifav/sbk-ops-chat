@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
         const vectorLiteral = `[${queryEmbedding.join(',')}]`
 
         const chunks = await prisma.$queryRawUnsafe<
-          Array<{ content: string; documentId: string; score: number }>
+          Array<{ content: string; documentId: string; score: unknown }>
         >(
           `SELECT dc.content, dc."documentId", 1 - (dc.embedding <=> $1::vector) as score
            FROM "DocumentChunk" dc
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
 
         if (chunks.length > 0) {
           const contextText = chunks
-            .map((c, i) => `### Trecho ${i + 1} (relevância: ${(c.score * 100).toFixed(0)}%)\n\n${c.content}`)
+            .map((c, i) => `### Trecho ${i + 1} (relevância: ${(Number(c.score) * 100).toFixed(0)}%)\n\n${c.content}`)
             .join('\n\n---\n\n')
           systemPrompt += `\n\n## Trechos relevantes da documentação\n\n${contextText}`
         } else {
@@ -78,6 +78,7 @@ export async function POST(req: NextRequest) {
         }
       }
     } catch (ragError: unknown) {
+      console.error('[chat] RAG failed, falling back to full document injection:', ragError)
       // Fallback: inject full documents up to CONTEXT_CHAR_CAP
       try {
         const documents = await prisma.document.findMany({
