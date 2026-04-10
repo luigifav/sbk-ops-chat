@@ -52,6 +52,7 @@ export async function GET(req: NextRequest) {
         active: true,
         order: true,
         createdAt: true,
+        embeddingStatus: true,
       },
     })
     return NextResponse.json({ documents })
