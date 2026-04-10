@@ -55,5 +55,6 @@ model Operator {
   name      String
   password  String
   active    Boolean  @default(true)
+  status    String   @default("active")
   createdAt DateTime @default(now())
 }

@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
 
   const operators = await prisma.operator.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, name: true, active: true, createdAt: true },
+    select: { id: true, name: true, active: true, status: true, createdAt: true },
   })
 
   return NextResponse.json({ operators })
@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
   const hashedPassword = await bcrypt.hash(password, 10)
   const operator = await prisma.operator.create({
     data: { name: name.trim(), password: hashedPassword },
-    select: { id: true, name: true, active: true, createdAt: true },
+    select: { id: true, name: true, active: true, status: true, createdAt: true },
   })
 
   return NextResponse.json({ operator }, { status: 201 })
@@ -59,24 +59,26 @@ export async function PATCH(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { id, active, password } = body as {
+  const { id, active, password, status } = body as {
     id?: string
     active?: boolean
     password?: string
+    status?: string
   }
 
   if (!id) {
     return NextResponse.json({ error: 'id obrigatório' }, { status: 400 })
   }
 
-  const data: { active?: boolean; password?: string } = {}
+  const data: { active?: boolean; password?: string; status?: string } = {}
   if (active !== undefined) data.active = active
+  if (status !== undefined) data.status = status
   if (password) data.password = await bcrypt.hash(password, 10)
 
   const operator = await prisma.operator.update({
     where: { id },
     data,
-    select: { id: true, name: true, active: true, createdAt: true },
+    select: { id: true, name: true, active: true, status: true, createdAt: true },
   })
 
   return NextResponse.json({ operator })
