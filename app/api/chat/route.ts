@@ -41,14 +41,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
 
-    // Build system prompt: base + admin-configured docs
+    // Build system prompt: base + all active documents
     let systemPrompt = BASE_SYSTEM_PROMPT
     try {
-      const setting = await prisma.setting.findUnique({
-        where: { key: 'system_prompt_docs' },
+      const documents = await prisma.document.findMany({
+        where: { active: true },
+        orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+        select: { name: true, content: true },
       })
-      if (setting?.value) {
-        systemPrompt += `\n\n## Documentação Operacional\n\n${setting.value}`
+      if (documents.length > 0) {
+        const docsText = documents
+          .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
+          .join('\n\n---\n\n')
+        systemPrompt += `\n\n## Documentação Operacional\n\n${docsText}`
       }
     } catch {
       // Proceed with base prompt only

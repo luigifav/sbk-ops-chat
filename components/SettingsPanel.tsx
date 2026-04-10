@@ -12,6 +12,16 @@ const DEFAULT_CHIPS = [
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
 const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx']
 
+interface DocumentItem {
+  id: string
+  name: string
+  type: string
+  sizeBytes: number
+  active: boolean
+  order: number
+  createdAt: string
+}
+
 function readAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -44,31 +54,76 @@ async function parseDocx(arrayBuffer: ArrayBuffer): Promise<string> {
   return result.value
 }
 
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+  return `${Math.round(bytes / 1024)} KB`
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('pt-BR', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+function FileIcon({ type }: { type: string }) {
+  if (type === 'pdf') {
+    return (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-red-500 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+      </svg>
+    )
+  }
+  if (type === 'docx') {
+    return (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-blue-500 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+      </svg>
+    )
+  }
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-gray-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+      <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+    </svg>
+  )
+}
+
 export default function SettingsPanel() {
-  const [systemPrompt, setSystemPrompt] = useState('')
+  const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [chips, setChips] = useState<string[]>(DEFAULT_CHIPS)
   const [loading, setLoading] = useState(true)
-  const [savingPrompt, setSavingPrompt] = useState(false)
+  const [uploading, setUploading] = useState(false)
   const [savingChips, setSavingChips] = useState(false)
-  const [promptMsg, setPromptMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [chipsMsg, setChipsMsg] = useState<{ text: string; ok: boolean } | null>(null)
-  const [fileLoading, setFileLoading] = useState(false)
   const [fileError, setFileError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  async function loadDocuments() {
+    const res = await fetch('/api/admin/documents')
+    if (!res.ok) return
+    const { documents: docs } = await res.json()
+    setDocuments(docs)
+  }
 
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch('/api/admin/settings')
-        if (!res.ok) return
-        const { settings } = await res.json()
-        for (const s of settings as { key: string; value: string }[]) {
-          if (s.key === 'system_prompt_docs') setSystemPrompt(s.value)
-          if (s.key === 'quick_chips') {
-            try {
-              const parsed = JSON.parse(s.value)
-              if (Array.isArray(parsed) && parsed.length > 0) setChips(parsed)
-            } catch {}
+        const [, settingsRes] = await Promise.all([
+          loadDocuments(),
+          fetch('/api/admin/settings'),
+        ])
+        if (settingsRes.ok) {
+          const { settings } = await settingsRes.json()
+          for (const s of settings as { key: string; value: string }[]) {
+            if (s.key === 'quick_chips') {
+              try {
+                const parsed = JSON.parse(s.value)
+                if (Array.isArray(parsed) && parsed.length > 0) setChips(parsed)
+              } catch {}
+            }
           }
         }
       } finally {
@@ -77,24 +132,6 @@ export default function SettingsPanel() {
     }
     load()
   }, [])
-
-  async function saveSystemPrompt() {
-    setSavingPrompt(true)
-    setPromptMsg(null)
-    try {
-      const res = await fetch('/api/admin/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'system_prompt_docs', value: systemPrompt }),
-      })
-      setPromptMsg({ text: res.ok ? 'Salvo com sucesso!' : 'Erro ao salvar.', ok: res.ok })
-    } catch {
-      setPromptMsg({ text: 'Erro ao salvar.', ok: false })
-    } finally {
-      setSavingPrompt(false)
-      setTimeout(() => setPromptMsg(null), 3000)
-    }
-  }
 
   async function saveChips() {
     setSavingChips(true)
@@ -116,7 +153,6 @@ export default function SettingsPanel() {
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
-    // Reset input so the same file can be re-selected after an error
     e.target.value = ''
     if (!file) return
 
@@ -133,7 +169,7 @@ export default function SettingsPanel() {
       return
     }
 
-    setFileLoading(true)
+    setUploading(true)
     try {
       let text = ''
       if (ext === 'txt' || ext === 'md') {
@@ -145,12 +181,49 @@ export default function SettingsPanel() {
         const buf = await file.arrayBuffer()
         text = await parseDocx(buf)
       }
-      setSystemPrompt(text)
+
+      const res = await fetch('/api/admin/documents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: file.name, content: text, type: ext, sizeBytes: file.size }),
+      })
+
+      if (!res.ok) {
+        setFileError('Erro ao salvar o documento. Tente novamente.')
+        return
+      }
+
+      await loadDocuments()
     } catch (err) {
-      console.error('File parse error:', err)
+      console.error('File upload error:', err)
       setFileError('Erro ao processar o arquivo. Tente novamente.')
     } finally {
-      setFileLoading(false)
+      setUploading(false)
+    }
+  }
+
+  async function toggleActive(id: string, current: boolean) {
+    setDocuments((prev) => prev.map((d) => (d.id === id ? { ...d, active: !current } : d)))
+    try {
+      await fetch('/api/admin/documents', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, active: !current }),
+      })
+    } catch {
+      // Revert optimistic update on failure
+      setDocuments((prev) => prev.map((d) => (d.id === id ? { ...d, active: current } : d)))
+    }
+  }
+
+  async function deleteDocument(id: string) {
+    if (!confirm('Remover este documento?')) return
+    setDocuments((prev) => prev.filter((d) => d.id !== id))
+    try {
+      await fetch(`/api/admin/documents?id=${id}`, { method: 'DELETE' })
+    } catch {
+      // Re-load on failure to restore correct state
+      await loadDocuments()
     }
   }
 
@@ -164,23 +237,16 @@ export default function SettingsPanel() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      {/* System Prompt */}
+      {/* Documents */}
       <div className="bg-white rounded-xl border border-gray-100 p-6">
         <h3 className="font-semibold text-gray-900 mb-1">Documentação operacional</h3>
         <p className="text-sm text-gray-500 mb-4">
-          Cole aqui o manual ou documentação interna. Este conteúdo é injetado no system
-          prompt do assistente a cada conversa.
+          Faça upload dos manuais e documentos internos. Os documentos ativos são injetados no
+          system prompt do assistente a cada conversa.
         </p>
-        <textarea
-          value={systemPrompt}
-          onChange={(e) => setSystemPrompt(e.target.value)}
-          rows={14}
-          placeholder="Cole aqui a documentação operacional da SBK..."
-          className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary resize-y"
-        />
 
-        {/* File upload */}
-        <div className="flex items-center gap-2 mt-2">
+        {/* Upload button */}
+        <div className="flex items-center gap-2 mb-4">
           <input
             ref={fileInputRef}
             type="file"
@@ -191,10 +257,10 @@ export default function SettingsPanel() {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={fileLoading}
+            disabled={uploading}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-sm text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
           >
-            {fileLoading ? (
+            {uploading ? (
               <>
                 <span className="w-3.5 h-3.5 border-2 border-gray-300 border-t-gray-500 rounded-full animate-spin" />
                 Processando…
@@ -219,30 +285,65 @@ export default function SettingsPanel() {
           </button>
           <span className="text-xs text-gray-400">PDF, TXT, MD, DOCX · máx. 5 MB</span>
         </div>
-        {fileError && (
-          <p className="text-sm text-red-600 mt-1">{fileError}</p>
-        )}
 
-        <div className="flex items-center justify-between mt-3">
-          <div>
-            {promptMsg && (
-              <p
-                className={`text-sm ${
-                  promptMsg.ok ? 'text-green-600' : 'text-red-600'
-                }`}
+        {fileError && <p className="text-sm text-red-600 mb-3">{fileError}</p>}
+
+        {/* Document list */}
+        {documents.length === 0 ? (
+          <p className="text-sm text-gray-500 text-center py-6">
+            Nenhum documento carregado. Faça upload de um arquivo para usar como contexto do chat.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {documents.map((doc) => (
+              <div
+                key={doc.id}
+                className="flex items-center gap-3 px-4 py-3 border border-gray-100 rounded-lg hover:bg-gray-50 transition-colors"
               >
-                {promptMsg.text}
-              </p>
-            )}
+                <FileIcon type={doc.type} />
+
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{doc.name}</p>
+                  <p className="text-xs text-gray-400">
+                    {formatSize(doc.sizeBytes)} · {formatDate(doc.createdAt)}
+                  </p>
+                </div>
+
+                {/* Active toggle */}
+                <button
+                  type="button"
+                  onClick={() => toggleActive(doc.id, doc.active)}
+                  aria-label={doc.active ? 'Desativar documento' : 'Ativar documento'}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                    doc.active ? 'bg-green-500' : 'bg-gray-200'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                      doc.active ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+
+                {/* Delete button */}
+                <button
+                  type="button"
+                  onClick={() => deleteDocument(doc.id)}
+                  aria-label="Remover documento"
+                  className="p-1 text-gray-300 hover:text-red-500 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path
+                      fillRule="evenodd"
+                      d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </div>
+            ))}
           </div>
-          <button
-            onClick={saveSystemPrompt}
-            disabled={savingPrompt}
-            className="px-4 py-2 bg-primary hover:bg-primary-dark text-white text-sm font-medium rounded-lg disabled:opacity-50 transition-colors"
-          >
-            {savingPrompt ? 'Salvando...' : 'Salvar documentação'}
-          </button>
-        </div>
+        )}
       </div>
 
       {/* Quick Chips */}
@@ -270,11 +371,7 @@ export default function SettingsPanel() {
         <div className="flex items-center justify-between mt-3">
           <div>
             {chipsMsg && (
-              <p
-                className={`text-sm ${
-                  chipsMsg.ok ? 'text-green-600' : 'text-red-600'
-                }`}
-              >
+              <p className={`text-sm ${chipsMsg.ok ? 'text-green-600' : 'text-red-600'}`}>
                 {chipsMsg.text}
               </p>
             )}
