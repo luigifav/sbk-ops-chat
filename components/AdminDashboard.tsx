@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import SettingsPanel from './SettingsPanel'
+import OperatorsPanel from './OperatorsPanel'
 import {
   BarChart,
   Bar,
@@ -33,7 +34,7 @@ interface Stats {
 }
 
 type Period = 'today' | '7days' | '30days' | 'all'
-type Tab = 'messages' | 'analytics' | 'settings'
+type Tab = 'messages' | 'analytics' | 'operators' | 'settings'
 
 const PERIOD_LABELS: Record<Period, string> = {
   today: 'Hoje',
@@ -454,7 +455,7 @@ export default function AdminDashboard() {
         {/* Tabs */}
         <div className="border-b border-gray-200 mb-6">
           <div className="flex gap-6">
-            {(['messages', 'analytics', 'settings'] as Tab[]).map((tab) => (
+            {(['messages', 'analytics', 'operators', 'settings'] as Tab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -464,7 +465,7 @@ export default function AdminDashboard() {
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {tab === 'messages' ? 'Mensagens' : tab === 'analytics' ? 'Analytics' : 'Configurações'}
+                {tab === 'messages' ? 'Mensagens' : tab === 'analytics' ? 'Analytics' : tab === 'operators' ? 'Operadores' : 'Configurações'}
               </button>
             ))}
           </div>
@@ -605,6 +606,9 @@ export default function AdminDashboard() {
             )}
           </div>
         )}
+
+        {/* Operators Tab */}
+        {activeTab === 'operators' && <OperatorsPanel />}
 
         {/* Settings Tab */}
         {activeTab === 'settings' && <SettingsPanel />}

@@ -49,3 +49,11 @@ model DocumentChunk {
 
   @@index([documentId])
 }
+
+model Operator {
+  id        String   @id @default(cuid())
+  name      String
+  password  String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
