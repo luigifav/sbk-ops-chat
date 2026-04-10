@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import MessageBubble from './MessageBubble'
+import SbkLogo from './SbkLogo'
 
 interface Message {
   id: string
@@ -31,37 +32,6 @@ function getOrCreateSessionId(): string {
   return newId
 }
 
-function SbkIcon({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="sbk-chat-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#01B2AA" />
-          <stop offset="100%" stopColor="#1F3A3A" />
-        </linearGradient>
-      </defs>
-      <rect x="1" y="9.5" width="14" height="3.5" rx="1" fill="url(#sbk-chat-g)" opacity="0.4" transform="rotate(-5 8 11.25)" />
-      <rect x="1" y="6" width="14" height="3.5" rx="1" fill="url(#sbk-chat-g)" opacity="0.65" transform="rotate(-5 8 7.75)" />
-      <rect x="1" y="2.5" width="14" height="3.5" rx="1" fill="url(#sbk-chat-g)" opacity="0.95" />
-    </svg>
-  )
-}
-
-function SbkIconLarge() {
-  return (
-    <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="sbk-empty-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#01B2AA" />
-          <stop offset="100%" stopColor="#1F3A3A" />
-        </linearGradient>
-      </defs>
-      <rect x="4" y="28" width="40" height="11" rx="3" fill="url(#sbk-empty-g)" opacity="0.35" transform="rotate(-6 24 33.5)" />
-      <rect x="4" y="18" width="40" height="11" rx="3" fill="url(#sbk-empty-g)" opacity="0.6" transform="rotate(-6 24 23.5)" />
-      <rect x="4" y="8" width="40" height="11" rx="3" fill="url(#sbk-empty-g)" opacity="0.9" />
-    </svg>
-  )
-}
 
 export default function Chat({ chips }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([])
@@ -195,11 +165,10 @@ export default function Chat({ chips }: ChatProps) {
         className="bg-brand-verde-escuro border-b-2 border-brand-turquesa px-4 flex items-center justify-between flex-shrink-0"
         style={{ height: '56px' }}
       >
-        <div className="flex items-center gap-2.5">
-          <SbkIcon size={16} />
-          <div>
-            <h1 className="text-sm font-semibold text-white leading-none">SBK Operacional</h1>
-            <p className="text-[11px] text-brand-turquesa mt-0.5">
+        <div className="flex items-center gap-3">
+          <SbkLogo color="#FFFFFF" width={88} height={30} />
+          <div className="border-l border-white/20 pl-3">
+            <p className="text-[11px] text-brand-turquesa leading-none">
               {operatorName ? `Olá, ${operatorName}` : 'Assistente de operações'}
             </p>
           </div>
@@ -227,7 +196,7 @@ export default function Chat({ chips }: ChatProps) {
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full pb-16 px-4">
             <div className="animate-fade-in-up">
-              <SbkIconLarge />
+              <SbkLogo color="#1F3A3A" width={160} height={54} />
             </div>
             <h2 className="text-xl font-semibold text-brand-verde-escuro mb-2 mt-5 animate-fade-in-up anim-delay-100">
               Como posso ajudar?
