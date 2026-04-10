@@ -84,6 +84,17 @@ export async function POST(req: NextRequest) {
     const document = await prisma.document.create({
       data: { name, content, type, sizeBytes, order: count },
     })
+    const embedUrl = new URL('/api/admin/documents/embed', req.url).toString()
+    fetch(embedUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        cookie: req.headers.get('cookie') ?? '',
+      },
+      body: JSON.stringify({ documentId: document.id }),
+    }).catch((err) => {
+      console.error('[documents/route] Background embed failed:', err)
+    })
     return NextResponse.json({ document }, { status: 201 })
   } catch (err) {
     console.error('[POST /api/admin/documents]', err)
