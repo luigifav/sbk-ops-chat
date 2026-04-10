@@ -41,22 +41,74 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
 
-    // Build system prompt: base + all active documents
+    // Build system prompt using RAG or fallback to full document injection
     let systemPrompt = BASE_SYSTEM_PROMPT
+    const CONTEXT_CHAR_CAP = 80_000
+
     try {
-      const documents = await prisma.document.findMany({
-        where: { active: true },
-        orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-        select: { name: true, content: true },
-      })
-      if (documents.length > 0) {
-        const docsText = documents
-          .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
-          .join('\n\n---\n\n')
-        systemPrompt += `\n\n## Documentação Operacional\n\n${docsText}`
+      // Try RAG: embed the user query and fetch relevant chunks
+      const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')
+      const queryText = lastUserMessage?.content ?? ''
+
+      if (queryText) {
+        const { embedQuery } = await import('@/lib/embeddings')
+        const queryEmbedding = await embedQuery(queryText)
+        const vectorLiteral = `[${queryEmbedding.join(',')}]`
+
+        const chunks = await prisma.$queryRawUnsafe<
+          Array<{ content: string; documentId: string; score: number }>
+        >(
+          `SELECT dc.content, dc."documentId", 1 - (dc.embedding <=> $1::vector) as score
+           FROM "DocumentChunk" dc
+           JOIN "Document" d ON d.id = dc."documentId"
+           WHERE d.active = true
+           ORDER BY dc.embedding <=> $1::vector
+           LIMIT 5`,
+          vectorLiteral
+        )
+
+        if (chunks.length > 0) {
+          const contextText = chunks
+            .map((c, i) => `### Trecho ${i + 1} (relevância: ${(c.score * 100).toFixed(0)}%)\n\n${c.content}`)
+            .join('\n\n---\n\n')
+          systemPrompt += `\n\n## Trechos relevantes da documentação\n\n${contextText}`
+        } else {
+          // Fallback: no chunks exist yet, inject full documents with cap
+          throw new Error('no_chunks')
+        }
       }
-    } catch {
-      // Proceed with base prompt only
+    } catch (ragError: unknown) {
+      // Fallback: inject full documents up to CONTEXT_CHAR_CAP
+      try {
+        const documents = await prisma.document.findMany({
+          where: { active: true },
+          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+          select: { name: true, content: true },
+        })
+
+        if (documents.length > 0) {
+          let total = 0
+          const selected: typeof documents = []
+
+          for (const doc of documents) {
+            if (total + doc.content.length > CONTEXT_CHAR_CAP) {
+              console.warn(`[chat] Context cap reached at document "${doc.name}", skipping remaining`)
+              break
+            }
+            selected.push(doc)
+            total += doc.content.length
+          }
+
+          if (selected.length > 0) {
+            const docsText = selected
+              .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
+              .join('\n\n---\n\n')
+            systemPrompt += `\n\n## Documentação Operacional\n\n${docsText}`
+          }
+        }
+      } catch {
+        // Proceed with base prompt only
+      }
     }
 
     // Extract question text for logging (last user message)

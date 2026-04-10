@@ -23,12 +23,25 @@ model Setting {
 }
 
 model Document {
-  id        String   @id @default(cuid())
-  name      String
-  content   String
-  type      String
-  sizeBytes Int
-  active    Boolean  @default(true)
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
+  id              String          @id @default(cuid())
+  name            String
+  content         String
+  type            String
+  sizeBytes       Int
+  active          Boolean         @default(true)
+  order           Int             @default(0)
+  createdAt       DateTime        @default(now())
+  embeddingStatus String          @default("pending")
+  chunks          DocumentChunk[]
+}
+
+model DocumentChunk {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  chunkIndex Int
+  createdAt  DateTime @default(now())
+
+  @@index([documentId])
 }
