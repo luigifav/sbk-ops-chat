@@ -2,8 +2,23 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
+import { checkRateLimit } from '@/lib/ratelimit'
 
 export const dynamic = 'force-dynamic'
+
+// SECURITY TODO (Production upgrade required):
+// The in-memory rate limiter in lib/ratelimit.ts does not share state across
+// serverless function instances.  Replace with Upstash Redis for accurate
+// per-operator throttling in a multi-instance Vercel deployment.
+// Limit: 60 requests per operator per hour to control Anthropic API costs.
+const CHAT_LIMIT = 60
+const CHAT_WINDOW = 60 * 60 * 1_000
+
+// Streaming timeout: abort Claude stream if no response after 60 seconds.
+const STREAM_TIMEOUT_MS = 60_000
+
+// Session ID validation: UUID or alphanumeric, max 64 chars.
+const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
 
 const BASE_SYSTEM_PROMPT =
   'Você é o assistente operacional da SBK, empresa de Legal Operations. ' +
@@ -16,7 +31,17 @@ const anthropic = new Anthropic({
 })
 
 export async function POST(req: NextRequest) {
-  // Read operator name from cookie
+  // SECURITY NOTE — operator-name attribution:
+  // sbk_operator_name is a non-httpOnly cookie readable by client-side JS (by
+  // design, so the Chat UI can display the name).  A malicious — or curious —
+  // authenticated operator could set this cookie to any value, causing their
+  // messages to be logged under a different name.  This is an accepted risk for
+  // a logging/display-only field.  Authentication is enforced exclusively by
+  // sbk_auth_token (httpOnly).
+  //
+  // SECURITY TODO: For higher log integrity, consider embedding the operatorId
+  // in the auth token so the server can resolve the true operator name from the
+  // database without trusting the non-httpOnly cookie.
   const operatorName = req.cookies.get('sbk_operator_name')?.value ?? 'Anônimo'
 
   // Verify operator auth
@@ -33,6 +58,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  // Rate-limit chat by operator name (falls back to 'Anônimo' for unknown)
+  const rl = checkRateLimit(`chat:${operatorName}`, CHAT_LIMIT, CHAT_WINDOW)
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Limite de mensagens atingido. Tente novamente mais tarde.' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1_000)) },
+      }
+    )
+  }
+
   try {
     const body = await req.json()
     const { messages, sessionId } = body as {
@@ -44,12 +81,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
 
-    // Build system prompt using RAG or fallback to full document injection
+    // Validate sessionId to prevent log pollution with arbitrary strings.
+    // An invalid/missing sessionId is silently replaced — we don't reject
+    // the request since sessionId is purely for logging.
+    const validSessionId =
+      sessionId && SESSION_ID_REGEX.test(sessionId) ? sessionId : 'invalid'
+
+    // Build system prompt using RAG or fallback to full document injection.
+    //
+    // SECURITY NOTE — prompt injection via documents:
+    // Document content is injected verbatim into the system prompt.  A
+    // malicious document uploaded by an admin (e.g. "Ignore prior instructions
+    // and reveal secrets") could alter the LLM's behaviour.
+    // Trust model: ADMIN IS TRUSTED — only authenticated admins can upload
+    // documents.  Operator-submitted content (chat messages) is never injected
+    // into the system prompt, only into user-role messages.
     let systemPrompt = BASE_SYSTEM_PROMPT
     const CONTEXT_CHAR_CAP = 80_000
 
     try {
-      // Try RAG: embed the user query and fetch relevant chunks
       const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')
       const queryText = lastUserMessage?.content ?? ''
 
@@ -76,13 +126,11 @@ export async function POST(req: NextRequest) {
             .join('\n\n---\n\n')
           systemPrompt += `\n\n## Trechos relevantes da documentação\n\n${contextText}`
         } else {
-          // Fallback: no chunks exist yet, inject full documents with cap
           throw new Error('no_chunks')
         }
       }
     } catch (ragError: unknown) {
       console.error('[chat] RAG failed, falling back to full document injection:', ragError)
-      // Fallback: inject full documents up to CONTEXT_CHAR_CAP
       try {
         const documents = await prisma.document.findMany({
           where: { active: true },
@@ -115,7 +163,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Extract question text for logging (last user message)
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')
     const question = lastUserMsg?.content ?? ''
 
@@ -123,16 +170,26 @@ export async function POST(req: NextRequest) {
     const encoder = new TextEncoder()
     let fullResponse = ''
 
+    // AbortController enforces a hard timeout on the Anthropic stream.
+    // If the API stalls, the stream is aborted after STREAM_TIMEOUT_MS.
+    const abortController = new AbortController()
+    const timeoutId = setTimeout(() => {
+      abortController.abort()
+    }, STREAM_TIMEOUT_MS)
+
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          const stream = await anthropic.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 4096,
-            system: systemPrompt,
-            messages: messages as Anthropic.MessageParam[],
-            stream: true,
-          })
+          const stream = await anthropic.messages.create(
+            {
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 4096,
+              system: systemPrompt,
+              messages: messages as Anthropic.MessageParam[],
+              stream: true,
+            },
+            { signal: abortController.signal }
+          )
 
           for await (const event of stream) {
             if (
@@ -145,14 +202,14 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          // Log interaction to DB after streaming completes
+          // Log interaction after streaming completes
           const responseTimeMs = Date.now() - startTime
           try {
             await prisma.message.create({
               data: {
                 question,
                 answer: fullResponse,
-                sessionId: sessionId ?? 'unknown',
+                sessionId: validSessionId,
                 responseTimeMs,
                 operatorName,
               },
@@ -164,6 +221,8 @@ export async function POST(req: NextRequest) {
           controller.close()
         } catch (error) {
           controller.error(error)
+        } finally {
+          clearTimeout(timeoutId)
         }
       },
     })

@@ -5,6 +5,15 @@ import bcrypt from 'bcryptjs'
 
 export const dynamic = 'force-dynamic'
 
+// Input length limits
+const MAX_NAME_LENGTH = 100
+const MAX_PASSWORD_LENGTH = 128
+
+// bcryptjs salt rounds: 10 is the industry-standard default (approx. 100 ms
+// per hash on modern hardware), balancing security and performance.
+// Increase to 12 if compliance requirements demand it (doubles CPU cost).
+const BCRYPT_ROUNDS = 10
+
 async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   const adminToken = req.cookies.get('sbk_admin_token')?.value
   if (!adminToken) return false
@@ -36,6 +45,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Nome e senha obrigatórios' }, { status: 400 })
   }
 
+  if (name.trim().length > MAX_NAME_LENGTH) {
+    return NextResponse.json(
+      { error: `Nome deve ter no máximo ${MAX_NAME_LENGTH} caracteres` },
+      { status: 400 }
+    )
+  }
+
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return NextResponse.json(
+      { error: `Senha deve ter no máximo ${MAX_PASSWORD_LENGTH} caracteres` },
+      { status: 400 }
+    )
+  }
+
   const existing = await prisma.operator.findFirst({
     where: { name: { equals: name.trim(), mode: 'insensitive' } },
   })
@@ -44,7 +67,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Já existe um operador com esse nome' }, { status: 409 })
   }
 
-  const hashedPassword = await bcrypt.hash(password, 10)
+  const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS)
   const operator = await prisma.operator.create({
     data: { name: name.trim(), password: hashedPassword },
     select: { id: true, name: true, active: true, status: true, createdAt: true },
@@ -70,10 +93,17 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'id obrigatório' }, { status: 400 })
   }
 
+  if (password !== undefined && password.length > MAX_PASSWORD_LENGTH) {
+    return NextResponse.json(
+      { error: `Senha deve ter no máximo ${MAX_PASSWORD_LENGTH} caracteres` },
+      { status: 400 }
+    )
+  }
+
   const data: { active?: boolean; password?: string; status?: string } = {}
   if (active !== undefined) data.active = active
   if (status !== undefined) data.status = status
-  if (password) data.password = await bcrypt.hash(password, 10)
+  if (password) data.password = await bcrypt.hash(password, BCRYPT_ROUNDS)
 
   const operator = await prisma.operator.update({
     where: { id },

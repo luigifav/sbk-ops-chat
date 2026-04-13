@@ -12,6 +12,30 @@ async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   return verifyToken(adminToken, process.env.ADMIN_PASSWORD!, process.env.AUTH_SECRET!)
 }
 
+/**
+ * Converts an embedding array to a PostgreSQL vector literal string.
+ *
+ * Defense-in-depth: each value is validated to be a finite number before
+ * inclusion in the literal.  Voyage AI embeddings should always be finite
+ * floats, but this prevents unexpected NaN/Infinity values (which would cause
+ * a PostgreSQL cast error) from reaching the database.
+ *
+ * NOTE: The vector literal is passed as a parameterised argument ($4) to
+ * prisma.$executeRawUnsafe — it is NOT interpolated directly into the SQL
+ * string.  The SQL injection risk is therefore low, but input validation
+ * provides an additional layer of assurance.
+ */
+function toVectorLiteral(embedding: number[]): string {
+  const values = embedding.map((v, i) => {
+    const n = Number(v)
+    if (!isFinite(n)) {
+      throw new Error(`Invalid embedding value at index ${i}: ${v}`)
+    }
+    return n
+  })
+  return `[${values.join(',')}]`
+}
+
 export async function POST(req: NextRequest) {
   if (!(await checkAdminAuth(req))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -52,14 +76,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ chunksCreated: 0 })
     }
 
-    // Generate embeddings
+    // Generate embeddings via Voyage AI
     const embeddings = await embedBatch(chunks)
 
-    // Insert chunks with embeddings via raw SQL (Prisma doesn't support vector type natively)
+    // Insert chunks with embeddings via raw SQL (Prisma doesn't support the
+    // pgvector type natively).  Parameters $1–$5 are passed as bound parameters
+    // to prevent SQL injection; the vector literal is validated above.
     const insertPromises = chunks.map((content, index) => {
       const id = crypto.randomUUID()
       const embedding = embeddings[index]
-      const vectorLiteral = `[${embedding.join(',')}]`
+      const vectorLiteral = toVectorLiteral(embedding)
       return prisma.$executeRawUnsafe(
         `INSERT INTO "DocumentChunk" ("id", "documentId", "content", "embedding", "chunkIndex", "createdAt")
          VALUES ($1, $2, $3, $4::vector, $5, NOW())`,

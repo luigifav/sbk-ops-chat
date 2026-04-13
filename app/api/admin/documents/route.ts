@@ -4,6 +4,13 @@ import { verifyToken } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 
+// Input size limits (server-side enforcement)
+const MAX_NAME_LENGTH = 255
+const MAX_TYPE_LENGTH = 50
+// 10 MB text limit — the 25 MB body limit in next.config.mjs covers the raw
+// upload; this constant guards against inflated text extracted from documents.
+const MAX_CONTENT_CHARS = 10 * 1024 * 1024
+
 async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   const adminToken = req.cookies.get('sbk_admin_token')?.value
   if (!adminToken) return false
@@ -82,6 +89,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'name, content, type and sizeBytes are required' }, { status: 400 })
     }
 
+    // Server-side input length validation
+    if (name.length > MAX_NAME_LENGTH) {
+      return NextResponse.json(
+        { error: `name must be at most ${MAX_NAME_LENGTH} characters` },
+        { status: 400 }
+      )
+    }
+
+    if (type.length > MAX_TYPE_LENGTH) {
+      return NextResponse.json(
+        { error: `type must be at most ${MAX_TYPE_LENGTH} characters` },
+        { status: 400 }
+      )
+    }
+
+    if (content.length > MAX_CONTENT_CHARS) {
+      return NextResponse.json(
+        { error: `Document content exceeds the maximum allowed size (${MAX_CONTENT_CHARS / 1024 / 1024} MB of text)` },
+        { status: 413 }
+      )
+    }
+
     const manualCategory = (category as string) ?? 'geral'
     let resolvedCategory = manualCategory
 
@@ -146,6 +175,15 @@ Responda APENAS com o id da categoria, sem explicação, sem pontuação. Uma pa
     const document = await prisma.document.create({
       data: { name, content, type, sizeBytes, order: count, category: resolvedCategory },
     })
+
+    // Trigger background embedding via internal HTTP call.
+    //
+    // SECURITY NOTE — internal fetch (SSRF assessment):
+    // The embed URL is derived from req.url (set by Next.js, not user input),
+    // so there is no SSRF vector from path traversal.  The admin's session
+    // cookie is forwarded so the embed endpoint can authenticate the request.
+    // This is safe as long as req.url is always the application's own origin,
+    // which Next.js guarantees.  No user-supplied URL component is used here.
     const embedUrl = new URL('/api/admin/documents/embed', req.url).toString()
     fetch(embedUrl, {
       method: 'POST',
