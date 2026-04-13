@@ -36,13 +36,10 @@ function readAsText(file: File): Promise<string> {
 
 async function parsePdf(arrayBuffer: ArrayBuffer): Promise<string> {
   const pdfjsLib = await import('pdfjs-dist')
-  // Use the locally bundled worker (served by webpack as a static asset) instead
-  // of loading from an external CDN. This fixes PDF parsing in restricted networks
-  // and removes the runtime dependency on unpkg.com.
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).toString()
+  // Serve the worker from public/pdf.worker.mjs (copied by postinstall from
+  // node_modules/pdfjs-dist). This avoids the CDN dependency and the Webpack
+  // new URL() limitation for node_modules files in Next.js 14.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs'
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
   const pageTexts: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
