@@ -10,8 +10,8 @@ const DEFAULT_CHIPS = [
   'Qual o prazo para W',
 ]
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024
-const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx']
+const MAX_FILE_SIZE = 20 * 1024 * 1024
+const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx', 'xlsx', 'xls']
 
 interface DocumentItem {
   id: string
@@ -81,6 +81,13 @@ function FileIcon({ type }: { type: string }) {
   if (type === 'docx') {
     return (
       <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-blue-500 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+      </svg>
+    )
+  }
+  if (type === 'xlsx' || type === 'xls') {
+    return (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-green-600 shrink-0" viewBox="0 0 20 20" fill="currentColor">
         <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
       </svg>
     )
@@ -189,13 +196,13 @@ export default function SettingsPanel() {
     setFileError(null)
 
     if (file.size > MAX_FILE_SIZE) {
-      setFileError('Arquivo muito grande. Tamanho máximo: 5 MB.')
+      setFileError('Arquivo muito grande. Tamanho máximo: 20 MB.')
       return
     }
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
     if (!SUPPORTED_EXTS.includes(ext)) {
-      setFileError('Tipo não suportado. Use PDF, TXT, MD ou DOCX.')
+      setFileError('Tipo não suportado. Use PDF, TXT, MD, DOCX, XLSX ou XLS.')
       return
     }
 
@@ -210,6 +217,18 @@ export default function SettingsPanel() {
       } else if (ext === 'docx') {
         const buf = await file.arrayBuffer()
         text = await parseDocx(buf)
+      } else if (ext === 'xlsx' || ext === 'xls') {
+        const buf = await file.arrayBuffer()
+        const XLSX = await import('xlsx')
+        const workbook = XLSX.read(buf, { type: 'array' })
+        const lines: string[] = []
+        for (const sheetName of workbook.SheetNames) {
+          lines.push(`## ${sheetName}`)
+          const sheet = workbook.Sheets[sheetName]
+          const csv = XLSX.utils.sheet_to_csv(sheet)
+          lines.push(csv)
+        }
+        text = lines.join('\n\n')
       }
 
       const res = await fetch('/api/admin/documents', {
@@ -401,7 +420,7 @@ export default function SettingsPanel() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.pdf,.docx"
+              accept=".txt,.md,.pdf,.docx,.xlsx,.xls"
               onChange={handleFileInput}
               className="hidden"
             />
@@ -427,7 +446,7 @@ export default function SettingsPanel() {
                     {dragOver ? 'Solte o arquivo aqui' : 'Arraste um arquivo ou clique para selecionar'}
                   </p>
                   <p className="text-[11px] text-brand-cinza-chumbo mt-0.5">
-                    PDF, TXT, MD, DOCX · máx. 5 MB · será salvo em{' '}
+                    PDF, TXT, MD, DOCX, XLSX, XLS · máx. 20 MB · será salvo em{' '}
                     <span className={`font-medium ${getCategoryById(selectedCategory).textColor}`}>
                       {getCategoryById(selectedCategory).label}
                     </span>
