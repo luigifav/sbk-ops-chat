@@ -36,8 +36,13 @@ function readAsText(file: File): Promise<string> {
 
 async function parsePdf(arrayBuffer: ArrayBuffer): Promise<string> {
   const pdfjsLib = await import('pdfjs-dist')
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+  // Use the locally bundled worker (served by webpack as a static asset) instead
+  // of loading from an external CDN. This fixes PDF parsing in restricted networks
+  // and removes the runtime dependency on unpkg.com.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/build/pdf.worker.min.mjs',
+    import.meta.url
+  ).toString()
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
   const pageTexts: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -244,14 +249,16 @@ export default function SettingsPanel() {
       })
 
       if (!res.ok) {
-        setFileError('Erro ao salvar o documento. Tente novamente.')
+        const data = await res.json().catch(() => ({}))
+        setFileError((data as { error?: string }).error ?? 'Erro ao salvar o documento. Tente novamente.')
         return
       }
 
       await loadDocuments()
     } catch (err) {
       console.error('File upload error:', err)
-      setFileError('Erro ao processar o arquivo. Tente novamente.')
+      const msg = err instanceof Error ? err.message : String(err)
+      setFileError(`Erro ao processar o arquivo: ${msg}`)
     } finally {
       setUploading(false)
     }
