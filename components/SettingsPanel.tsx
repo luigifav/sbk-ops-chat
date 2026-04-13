@@ -36,8 +36,10 @@ function readAsText(file: File): Promise<string> {
 
 async function parsePdf(arrayBuffer: ArrayBuffer): Promise<string> {
   const pdfjsLib = await import('pdfjs-dist')
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+  // Serve the worker from public/pdf.worker.mjs (copied by postinstall from
+  // node_modules/pdfjs-dist). This avoids the CDN dependency and the Webpack
+  // new URL() limitation for node_modules files in Next.js 14.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs'
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
   const pageTexts: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -244,14 +246,16 @@ export default function SettingsPanel() {
       })
 
       if (!res.ok) {
-        setFileError('Erro ao salvar o documento. Tente novamente.')
+        const data = await res.json().catch(() => ({}))
+        setFileError((data as { error?: string }).error ?? 'Erro ao salvar o documento. Tente novamente.')
         return
       }
 
       await loadDocuments()
     } catch (err) {
       console.error('File upload error:', err)
-      setFileError('Erro ao processar o arquivo. Tente novamente.')
+      const msg = err instanceof Error ? err.message : String(err)
+      setFileError(`Erro ao processar o arquivo: ${msg}`)
     } finally {
       setUploading(false)
     }

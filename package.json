@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "db:migrate:deploy": "prisma migrate deploy",
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate && mkdir -p public && (cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs public/pdf.worker.mjs 2>/dev/null || cp node_modules/pdfjs-dist/build/pdf.worker.mjs public/pdf.worker.mjs 2>/dev/null || true)",
     "start": "next start",
     "lint": "next lint",
     "db:push": "prisma db push",
