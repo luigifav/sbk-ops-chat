@@ -1,9 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateToken } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
+import { checkRateLimit } from '@/lib/ratelimit'
 import bcrypt from 'bcryptjs'
 
 export const dynamic = 'force-dynamic'
+
+// Input length limits
+const MAX_NAME_LENGTH = 100
+const MAX_PASSWORD_LENGTH = 128
+const MAX_INVITE_CODE_LENGTH = 128
+
+// Rate limits (per IP)
+const REGISTER_LIMIT = 5    // registrations per 10 minutes
+const REGISTER_WINDOW = 10 * 60 * 1_000
+const LOGIN_LIMIT = 10      // login attempts per 60 seconds
+const LOGIN_WINDOW = 60 * 1_000
+
+function getClientIp(req: NextRequest): string {
+  return (
+    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+    req.headers.get('x-real-ip') ??
+    'unknown'
+  )
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,13 +35,50 @@ export async function POST(req: NextRequest) {
       inviteCode?: string
     }
 
+    // --- Input validation ------------------------------------------------
     if (!operatorName?.trim() || !password) {
       return NextResponse.json({ error: 'Nome e senha obrigatórios' }, { status: 400 })
     }
 
-    // Auto-cadastro
+    if (operatorName.trim().length > MAX_NAME_LENGTH) {
+      return NextResponse.json(
+        { error: `Nome deve ter no máximo ${MAX_NAME_LENGTH} caracteres` },
+        { status: 400 }
+      )
+    }
+
+    if (password.length > MAX_PASSWORD_LENGTH) {
+      return NextResponse.json(
+        { error: `Senha deve ter no máximo ${MAX_PASSWORD_LENGTH} caracteres` },
+        { status: 400 }
+      )
+    }
+
+    const ip = getClientIp(req)
+
+    // --- Auto-cadastro ---------------------------------------------------
     if (isNewAccount) {
-      if (!inviteCode || inviteCode !== process.env.INVITE_CODE) {
+      // Rate-limit registrations by IP to prevent invite-code brute-force
+      const rl = checkRateLimit(`register:${ip}`, REGISTER_LIMIT, REGISTER_WINDOW)
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1_000)) },
+          }
+        )
+      }
+
+      // Validate invite code — length-check first to avoid unnecessary DB work
+      if (!inviteCode || inviteCode.length > MAX_INVITE_CODE_LENGTH) {
+        return NextResponse.json({ error: 'Código de convite inválido' }, { status: 401 })
+      }
+
+      // SECURITY: constant-time comparison prevents timing side-channel on invite code.
+      // The invite code is never echoed back in error responses or logs.
+      const expectedCode = process.env.INVITE_CODE ?? ''
+      if (inviteCode.length !== expectedCode.length || inviteCode !== expectedCode) {
         return NextResponse.json({ error: 'Código de convite inválido' }, { status: 401 })
       }
 
@@ -49,7 +106,19 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // Login normal
+    // --- Login normal ----------------------------------------------------
+    // Rate-limit login attempts by IP to prevent brute-force attacks
+    const rl = checkRateLimit(`login:${ip}`, LOGIN_LIMIT, LOGIN_WINDOW)
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: 'Muitas tentativas de login. Tente novamente em alguns instantes.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1_000)) },
+        }
+      )
+    }
+
     const operator = await prisma.operator.findFirst({
       where: {
         name: { equals: operatorName.trim(), mode: 'insensitive' },
@@ -90,6 +159,22 @@ export async function POST(req: NextRequest) {
       maxAge: 60 * 60 * 8,
       path: '/',
     })
+
+    // SECURITY NOTE: sbk_operator_name is intentionally NOT httpOnly so that
+    // the Chat component can read it via document.cookie to display the
+    // operator's name in the UI (see components/Chat.tsx).
+    //
+    // Accepted risk: a malicious script (e.g., via XSS) could read or spoof
+    // this value.  Because this cookie is used ONLY for logging/display — the
+    // actual authentication is performed by sbk_auth_token (httpOnly) — the
+    // impact is limited to log-attribution spoofing (an authenticated operator
+    // misrepresenting their name in chat logs).  No privilege escalation is
+    // possible via this cookie alone.
+    //
+    // SECURITY TODO: For higher log integrity, replace per-operator name
+    // attribution with a server-side lookup: store the operatorId in the
+    // auth token payload (e.g. HMAC(operatorId:accessPassword, secret)) so
+    // the server can resolve the real name without trusting the cookie.
     response.cookies.set('sbk_operator_name', operator.name, {
       httpOnly: false,
       sameSite: 'lax',

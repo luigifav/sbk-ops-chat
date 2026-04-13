@@ -40,7 +40,10 @@ export async function GET(req: NextRequest) {
 
   const { searchParams } = new URL(req.url)
   const period = (searchParams.get('period') ?? 'all') as Period
-  const search = searchParams.get('search') ?? ''
+  const rawSearch = searchParams.get('search') ?? ''
+  // Limit search string length to prevent ReDoS and log abuse
+  const MAX_SEARCH_LENGTH = 200
+  const search = rawSearch.slice(0, MAX_SEARCH_LENGTH)
   const exportCsv = searchParams.get('export') === 'csv'
 
   const startDate = getStartDate(period)

@@ -10,8 +10,32 @@ function arrayBufferToHex(buffer: ArrayBuffer): string {
 }
 
 /**
+ * Validates that the AUTH_SECRET environment variable meets the minimum
+ * security requirements (>= 32 characters).  Call once at application
+ * startup / first use so misconfigurations are caught early.
+ *
+ * Throws if the secret is absent or too short.
+ */
+export function validateAuthConfig(): void {
+  const secret = process.env.AUTH_SECRET
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      '[auth] AUTH_SECRET must be at least 32 characters long. ' +
+        'Generate one with: openssl rand -hex 32'
+    )
+  }
+}
+
+/**
  * Generates an HMAC-SHA256 token for the given password and secret.
  * The same password + secret always produces the same token.
+ *
+ * NOTE — token non-expiry: because this token is purely derived from
+ * password + secret, it has no server-side expiry beyond the cookie maxAge.
+ * Rotating AUTH_SECRET invalidates all outstanding tokens.
+ * Changing ADMIN_PASSWORD / ACCESS_PASSWORD also invalidates tokens for
+ * those roles.  If finer-grained revocation is needed, consider adding a
+ * nonce stored in the database.
  */
 export async function generateToken(password: string, secret: string): Promise<string> {
   const encoder = new TextEncoder()
