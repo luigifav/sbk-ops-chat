@@ -232,8 +232,14 @@ export default function SettingsPanel() {
         }
         text = lines.join('\n\n')
       } else if (ext === 'pptx') {
-        const officeParser = (await import('officeparser')).default
-        text = await officeParser.parseOfficeAsync(Buffer.from(await file.arrayBuffer()))
+        const formData = new FormData()
+        formData.append('file', file)
+        const parseRes = await fetch('/api/admin/parse-pptx', { method: 'POST', body: formData })
+        if (!parseRes.ok) {
+          const data = await parseRes.json().catch(() => ({}))
+          throw new Error((data as { error?: string }).error ?? 'Erro ao processar PPTX no servidor.')
+        }
+        text = (await parseRes.json()).text
       }
 
       const res = await fetch('/api/admin/documents', {
