@@ -11,7 +11,7 @@ const DEFAULT_CHIPS = [
 ]
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024
-const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx', 'xlsx', 'xls']
+const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx', 'xlsx', 'xls', 'pptx']
 
 interface DocumentItem {
   id: string
@@ -204,7 +204,7 @@ export default function SettingsPanel() {
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
     if (!SUPPORTED_EXTS.includes(ext)) {
-      setFileError('Tipo não suportado. Use PDF, TXT, MD, DOCX, XLSX ou XLS.')
+      setFileError('Tipo não suportado. Use PDF, TXT, MD, DOCX, XLSX, XLS ou PPTX.')
       return
     }
 
@@ -231,6 +231,9 @@ export default function SettingsPanel() {
           lines.push(csv)
         }
         text = lines.join('\n\n')
+      } else if (ext === 'pptx') {
+        const officeParser = (await import('officeparser')).default
+        text = await officeParser.parseOfficeAsync(Buffer.from(await file.arrayBuffer()))
       }
 
       const res = await fetch('/api/admin/documents', {
@@ -424,7 +427,7 @@ export default function SettingsPanel() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.pdf,.docx,.xlsx,.xls"
+              accept=".txt,.md,.pdf,.docx,.xlsx,.xls,.pptx"
               onChange={handleFileInput}
               className="hidden"
             />
@@ -450,7 +453,7 @@ export default function SettingsPanel() {
                     {dragOver ? 'Solte o arquivo aqui' : 'Arraste um arquivo ou clique para selecionar'}
                   </p>
                   <p className="text-[11px] text-brand-cinza-chumbo mt-0.5">
-                    PDF, TXT, MD, DOCX, XLSX, XLS · máx. 20 MB · será salvo em{' '}
+                    PDF, TXT, MD, DOCX, XLSX, XLS, PPTX · máx. 20 MB · será salvo em{' '}
                     <span className={`font-medium ${getCategoryById(selectedCategory).textColor}`}>
                       {getCategoryById(selectedCategory).label}
                     </span>
