@@ -40,7 +40,8 @@ export async function POST(req: NextRequest) {
       await unlink(tmpPath).catch(() => {})
     }
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
     console.error('[POST /api/admin/parse-pptx]', err)
-    return NextResponse.json({ error: 'Failed to parse PPTX file' }, { status: 500 })
+    return NextResponse.json({ error: `Failed to parse PPTX file: ${message}` }, { status: 500 })
   }
 }
