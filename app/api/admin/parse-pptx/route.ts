@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
-import officeParser from 'officeparser'
+// officeParser v6: parseOffice is callback-based (not a Promise); use
+// parseOfficeAsync which returns Promise<string> directly.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { parseOfficeAsync } = require('officeparser') as {
+  parseOfficeAsync: (path: string) => Promise<string>
+}
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { writeFile, unlink } from 'fs/promises'
@@ -33,8 +38,7 @@ export async function POST(req: NextRequest) {
     const tmpPath = join(tmpdir(), `${randomUUID()}.pptx`)
     try {
       await writeFile(tmpPath, buffer)
-      const ast = await officeParser.parseOffice(tmpPath)
-      const text = ast.toText()
+      const text = await parseOfficeAsync(tmpPath)
       return NextResponse.json({ text })
     } finally {
       await unlink(tmpPath).catch(() => {})
