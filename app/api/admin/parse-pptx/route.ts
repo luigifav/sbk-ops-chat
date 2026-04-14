@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
 import officeParser from 'officeparser'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { writeFile, unlink } from 'fs/promises'
+import { randomUUID } from 'crypto'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,10 +26,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'file is required' }, { status: 400 })
     }
 
+    // Write to a temp file with .pptx extension so officeparser detects the
+    // type from the extension (avoiding a dynamic import of file-type v21 ESM
+    // which fails in the Next.js / Vercel serverless environment).
     const buffer = Buffer.from(await file.arrayBuffer())
-    const ast = await officeParser.parseOffice(buffer)
-    const text = ast.toText()
-    return NextResponse.json({ text })
+    const tmpPath = join(tmpdir(), `${randomUUID()}.pptx`)
+    try {
+      await writeFile(tmpPath, buffer)
+      const ast = await officeParser.parseOffice(tmpPath)
+      const text = ast.toText()
+      return NextResponse.json({ text })
+    } finally {
+      await unlink(tmpPath).catch(() => {})
+    }
   } catch (err) {
     console.error('[POST /api/admin/parse-pptx]', err)
     return NextResponse.json({ error: 'Failed to parse PPTX file' }, { status: 500 })
