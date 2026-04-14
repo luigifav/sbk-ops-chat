@@ -123,6 +123,7 @@ export async function POST(req: NextRequest) {
         'zurich',
         'geral',
         'processos-internos',
+        'rh',
       ]
 
       try {
@@ -145,6 +146,7 @@ Categorias disponíveis:
 - eagle: documentos relacionados ao cliente Eagle
 - zurich: documentos relacionados ao cliente Zurich
 - processos-internos: manuais, procedimentos e processos internos da SBK
+- rh: documentos de recursos humanos, treinamentos, onboarding e central de dúvidas da equipe
 - geral: documentos que se aplicam a múltiplos clientes ou não se encaixam nas categorias acima
 
 Nome do arquivo: ${name}
