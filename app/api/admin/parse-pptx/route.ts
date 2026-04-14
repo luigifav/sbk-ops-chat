@@ -23,8 +23,7 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer())
-    const ast = await officeParser.parseOffice(buffer)
-    const text = ast.toText()
+    const text = await officeParser.parseOfficeAsync(buffer)
     return NextResponse.json({ text })
   } catch (err) {
     console.error('[POST /api/admin/parse-pptx]', err)
