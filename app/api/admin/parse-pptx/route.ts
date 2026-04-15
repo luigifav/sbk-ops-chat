@@ -1,42 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
-import AdmZip from 'adm-zip'
+import { unzipSync } from 'fflate'
 
 export const dynamic = 'force-dynamic'
 
+// NOTE: this server-side route is kept as a fallback for API clients that send
+// the raw PPTX bytes.  The main upload UI (SettingsPanel) parses PPTX in the
+// browser to stay under Vercel's 4.5 MB serverless body-size limit.
+
 async function checkAdminAuth(req: NextRequest): Promise<boolean> {
-  const adminToken = req.cookies.get('sbk_admin_token')?.value
-  if (!adminToken) return false
-  return verifyToken(adminToken, process.env.ADMIN_PASSWORD!, process.env.AUTH_SECRET!)
+  try {
+    const adminToken = req.cookies.get('sbk_admin_token')?.value
+    if (!adminToken) return false
+    return verifyToken(adminToken, process.env.ADMIN_PASSWORD!, process.env.AUTH_SECRET!)
+  } catch {
+    return false
+  }
 }
 
-// PPTX files are ZIP archives containing DrawingML XML.
-// Text lives in <a:t> elements inside ppt/slides/slideN.xml files.
-// This avoids the officeparser/file-type ESM incompatibility in Next.js serverless.
-function extractTextFromPptx(buffer: Buffer): string {
-  const zip = new AdmZip(buffer)
+// PPTX = ZIP archive. Text lives in <a:t> DrawingML elements
+// inside ppt/slides/slideN.xml entries.
+function extractTextFromPptx(buffer: Uint8Array): string {
+  const unzipped = unzipSync(buffer)
   const slidePattern = /^ppt\/slides\/slide\d+\.xml$/
+  const decoder = new TextDecoder('utf-8')
 
-  const slideEntries = zip
-    .getEntries()
-    .filter((entry) => slidePattern.test(entry.entryName))
-    .sort((a, b) => {
-      const numA = parseInt(a.entryName.match(/\d+/)?.[0] ?? '0', 10)
-      const numB = parseInt(b.entryName.match(/\d+/)?.[0] ?? '0', 10)
-      return numA - numB
+  const slideTexts = Object.entries(unzipped)
+    .filter(([name]) => slidePattern.test(name))
+    .sort(([a], [b]) => {
+      const n = (s: string) => parseInt(s.match(/\d+/)?.[0] ?? '0', 10)
+      return n(a) - n(b)
     })
-
-  const slideTexts: string[] = []
-
-  for (const entry of slideEntries) {
-    const xml = entry.getData().toString('utf-8')
-    const textMatches = xml.match(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g) ?? []
-    const slideText = textMatches
-      .map((t) => t.replace(/<[^>]*>/g, '').trim())
-      .filter(Boolean)
-      .join(' ')
-    if (slideText.trim()) slideTexts.push(slideText.trim())
-  }
+    .map(([, data]) => {
+      const xml = decoder.decode(data)
+      return (xml.match(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g) ?? [])
+        .map((t) => t.replace(/<[^>]*>/g, '').trim())
+        .filter(Boolean)
+        .join(' ')
+    })
+    .filter(Boolean)
 
   return slideTexts.join('\n\n')
 }
@@ -53,7 +55,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'file is required' }, { status: 400 })
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer())
+    const buffer = new Uint8Array(await file.arrayBuffer())
     const text = extractTextFromPptx(buffer)
 
     if (!text.trim()) {

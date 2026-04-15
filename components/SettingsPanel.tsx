@@ -232,14 +232,31 @@ export default function SettingsPanel() {
         }
         text = lines.join('\n\n')
       } else if (ext === 'pptx') {
-        const formData = new FormData()
-        formData.append('file', file)
-        const parseRes = await fetch('/api/admin/parse-pptx', { method: 'POST', body: formData })
-        if (!parseRes.ok) {
-          const data = await parseRes.json().catch(() => ({}))
-          throw new Error((data as { error?: string }).error ?? 'Erro ao processar PPTX no servidor.')
+        const buf = await file.arrayBuffer()
+        const { unzipSync } = await import('fflate')
+        const unzipped = unzipSync(new Uint8Array(buf))
+        const slidePattern = /^ppt\/slides\/slide\d+\.xml$/
+        const decoder = new TextDecoder('utf-8')
+        const slideTexts = Object.entries(unzipped)
+          .filter(([name]) => slidePattern.test(name))
+          .sort(([a], [b]) => {
+            const n = (s: string) => parseInt(s.match(/\d+/)?.[0] ?? '0', 10)
+            return n(a) - n(b)
+          })
+          .map(([, data]) => {
+            const xml = decoder.decode(data)
+            return (xml.match(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g) ?? [])
+              .map((t) => t.replace(/<[^>]*>/g, '').trim())
+              .filter(Boolean)
+              .join(' ')
+          })
+          .filter(Boolean)
+        if (slideTexts.length === 0) {
+          throw new Error(
+            'Não foi possível extrair texto deste PPTX. Verifique se o arquivo contém texto (não apenas imagens).'
+          )
         }
-        text = (await parseRes.json()).text
+        text = slideTexts.join('\n\n')
       }
 
       const res = await fetch('/api/admin/documents', {
