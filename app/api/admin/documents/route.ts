@@ -124,6 +124,7 @@ export async function POST(req: NextRequest) {
         'geral',
         'processos-internos',
         'rh',
+        'cwt',
       ]
 
       try {
@@ -145,6 +146,7 @@ Categorias disponíveis:
 - agibank: documentos relacionados ao cliente Agibank
 - eagle: documentos relacionados ao cliente Eagle
 - zurich: documentos relacionados ao cliente Zurich
+- cwt: documentos relacionados ao cliente CWT
 - processos-internos: manuais, procedimentos e processos internos da SBK
 - rh: documentos de recursos humanos, treinamentos, onboarding e central de dúvidas da equipe
 - geral: documentos que se aplicam a múltiplos clientes ou não se encaixam nas categorias acima
