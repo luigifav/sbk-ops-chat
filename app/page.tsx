@@ -6,12 +6,13 @@ import LoginScreen from '@/components/LoginScreen'
 export const dynamic = 'force-dynamic'
 
 interface PageProps {
-  searchParams: { admin?: string }
+  searchParams: Promise<{ admin?: string }>
 }
 
 export default async function Home({ searchParams }: PageProps) {
-  const cookieStore = cookies()
-  const isAdmin = searchParams.admin === '1'
+  const cookieStore = await cookies()
+  const { admin } = await searchParams
+  const isAdmin = admin === '1'
 
   if (isAdmin) {
     const adminToken = cookieStore.get('sbk_admin_token')?.value
