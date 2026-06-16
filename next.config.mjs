@@ -52,8 +52,8 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const nextConfig = {
+  serverExternalPackages: ['@prisma/client'],
   experimental: {
-    serverComponentsExternalPackages: ['@prisma/client'],
     serverActions: {
       // 25 MB body limit for document uploads.
       // SECURITY NOTE: This is intentionally large to support PDF/DOCX uploads.
