@@ -209,12 +209,17 @@ export async function POST(req: NextRequest) {
            FROM "DocumentChunk" dc
            JOIN "Document" d ON d.id = dc."documentId"
            WHERE d.active = true
+           AND (dc.embedding <=> $1::vector) < 0.35
            ORDER BY dc.embedding <=> $1::vector
-           LIMIT 5`,
+           LIMIT 8`,
           vectorLiteral
         )
 
         if (chunks.length > 0) {
+          const topScore = Number(chunks[0].score)
+          if (topScore < 0.65) {
+            throw new Error('no_chunks')
+          }
           const clientHint = chunks
             .map(c => c.category ?? '')
             .filter(Boolean)
@@ -237,7 +242,8 @@ export async function POST(req: NextRequest) {
         }
       }
     } catch (ragError: unknown) {
-      console.error('[chat] RAG failed, falling back to full document injection:', ragError)
+      const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
+      console.warn('[chat] RAG fallback triggered:', ragErrorMsg)
       try {
         const documents = await prisma.document.findMany({
           where: { active: true },
