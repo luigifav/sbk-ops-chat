@@ -63,6 +63,20 @@ export const CATEGORIES: Category[] = [
     textColor: 'text-indigo-700',
     borderColor: 'border-indigo-200',
   },
+  {
+    id: 'instrucoes-fixas',
+    label: 'Instruções Fixas',
+    color: 'bg-amber-50',
+    textColor: 'text-amber-700',
+    borderColor: 'border-amber-200',
+  },
+  {
+    id: 'instrucoes-agibank',
+    label: 'Instruções Agibank',
+    color: 'bg-blue-50',
+    textColor: 'text-blue-700',
+    borderColor: 'border-blue-200',
+  },
 ]
 
 export function getCategoryById(id: string): Category {
