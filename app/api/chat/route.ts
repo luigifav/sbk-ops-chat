@@ -164,10 +164,18 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
-    const { messages, sessionId } = body as {
+    const { messages: rawMessages, sessionId } = body as {
       messages: Array<{ role: 'user' | 'assistant'; content: string }>
       sessionId: string
     }
+
+    const lastMessage = rawMessages[rawMessages.length - 1]
+    const isPetition =
+      lastMessage?.role === 'user' && lastMessage?.content?.length > 400
+
+    const messages = isPetition
+      ? [lastMessage]
+      : rawMessages.slice(-10)
 
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
@@ -312,7 +320,7 @@ export async function POST(req: NextRequest) {
           const stream = await anthropic.messages.create(
             {
               model: 'claude-sonnet-4-6',
-              max_tokens: 4096,
+              max_tokens: 2048,
               system: systemBlocks,
               messages: messages as Anthropic.MessageParam[],
               stream: true,
