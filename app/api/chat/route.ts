@@ -107,11 +107,7 @@ Cliente: [cliente identificado]
 
 ---
 
-Valores válidos para Produto (use EXCLUSIVAMENTE estes, sem variações):
-<<SUBSTITUIR PELOS VALORES DO GLOSSÁRIO>>
-
-Valores válidos para Causa Raiz (use EXCLUSIVAMENTE estes, sem variações):
-<<SUBSTITUIR PELOS VALORES DO GLOSSÁRIO>>
+Os valores válidos para Produto e Causa Raiz estão definidos nos documentos operacionais injetados abaixo como contexto RAG. Use EXCLUSIVAMENTE os valores que aparecerem nesses documentos. Se não encontrar nenhum valor de Produto ou Causa Raiz nos trechos recuperados, responda: 'Não encontrei o glossário de classificação na documentação disponível. Certifique-se de que o documento com os valores válidos está ativo no painel de configurações.'
 
 Regras obrigatórias:
 - Nunca invente valores fora das listas acima
