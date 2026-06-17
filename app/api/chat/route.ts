@@ -197,6 +197,55 @@ export async function POST(req: NextRequest) {
     // documents.  Operator-submitted content (chat messages) is never injected
     // into the system prompt, only into user-role messages.
     let systemPrompt = BASE_SYSTEM_PROMPT
+
+    // Injeta instruções fixas globais — sempre, independente de cliente
+    try {
+      const fixedDocs = await prisma.document.findMany({
+        where: { active: true, category: 'instrucoes-fixas' },
+        orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+        select: { name: true, content: true },
+      })
+      if (fixedDocs.length > 0) {
+        const fixedText = fixedDocs
+          .map(doc => `### ${doc.name}\n\n${doc.content}`)
+          .join('\n\n---\n\n')
+        systemPrompt += `\n\n## Instruções Operacionais Fixas\n\n${fixedText}`
+      }
+    } catch (err) {
+      console.warn('[chat] Falha ao carregar instruções fixas:', err)
+    }
+
+    // Injeta instruções específicas por cliente com base em detecção
+    // de nome próprio na última mensagem do usuário
+    try {
+      const lastUserMessage = [...messages]
+        .reverse()
+        .find(m => m.role === 'user')?.content ?? ''
+
+      const clientInstructions: Array<{ category: string; regex: RegExp }> = [
+        { category: 'instrucoes-agibank',   regex: /\bagibank\b/i },
+        { category: 'instrucoes-bradesco',  regex: /\bbradesco\b/i },
+      ]
+
+      for (const { category, regex } of clientInstructions) {
+        if (regex.test(lastUserMessage)) {
+          const clientDocs = await prisma.document.findMany({
+            where: { active: true, category },
+            orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+            select: { name: true, content: true },
+          })
+          if (clientDocs.length > 0) {
+            const clientText = clientDocs
+              .map(doc => `### ${doc.name}\n\n${doc.content}`)
+              .join('\n\n---\n\n')
+            systemPrompt += `\n\n## Instruções Operacionais — ${category}\n\n${clientText}`
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[chat] Falha ao carregar instruções por cliente:', err)
+    }
+
     const CONTEXT_CHAR_CAP = 80_000
 
     try {

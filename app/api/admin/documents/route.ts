@@ -125,6 +125,8 @@ export async function POST(req: NextRequest) {
         'processos-internos',
         'rh',
         'cwt',
+        'instrucoes-fixas',
+        'instrucoes-agibank',
       ]
 
       try {
