@@ -127,6 +127,7 @@ export async function POST(req: NextRequest) {
         'cwt',
         'instrucoes-fixas',
         'instrucoes-agibank',
+        'instrucoes-bradesco',
       ]
 
       try {
@@ -151,6 +152,7 @@ Categorias disponíveis:
 - cwt: documentos relacionados ao cliente CWT
 - processos-internos: manuais, procedimentos e processos internos da SBK
 - rh: documentos de recursos humanos, treinamentos, onboarding e central de dúvidas da equipe
+- instrucoes-bradesco: instruções operacionais específicas para o cliente Bradesco
 - geral: documentos que se aplicam a múltiplos clientes ou não se encaixam nas categorias acima
 
 Nome do arquivo: ${name}
