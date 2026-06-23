@@ -77,6 +77,13 @@ export const CATEGORIES: Category[] = [
     textColor: 'text-blue-700',
     borderColor: 'border-blue-200',
   },
+  {
+    id: 'instrucoes-bradesco',
+    label: 'Instruções Bradesco',
+    color: 'bg-red-50',
+    textColor: 'text-red-700',
+    borderColor: 'border-red-200',
+  },
 ]
 
 export function getCategoryById(id: string): Category {
