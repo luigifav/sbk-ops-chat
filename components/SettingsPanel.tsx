@@ -10,7 +10,7 @@ const DEFAULT_CHIPS = [
   'Qual o prazo para W',
 ]
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024
+const MAX_FILE_SIZE = 50 * 1024 * 1024
 const SUPPORTED_EXTS = ['txt', 'md', 'pdf', 'docx', 'xlsx', 'xls', 'pptx']
 
 interface DocumentItem {
@@ -198,7 +198,7 @@ export default function SettingsPanel() {
     setFileError(null)
 
     if (file.size > MAX_FILE_SIZE) {
-      setFileError('Arquivo muito grande. Tamanho máximo: 20 MB.')
+      setFileError('Arquivo muito grande. Tamanho máximo: 50 MB.')
       return
     }
 
@@ -476,7 +476,7 @@ export default function SettingsPanel() {
                     {dragOver ? 'Solte o arquivo aqui' : 'Arraste um arquivo ou clique para selecionar'}
                   </p>
                   <p className="text-[11px] text-brand-cinza-chumbo mt-0.5">
-                    PDF, TXT, MD, DOCX, XLSX, XLS, PPTX · máx. 20 MB · será salvo em{' '}
+                    PDF, TXT, MD, DOCX, XLSX, XLS, PPTX · máx. 50 MB · será salvo em{' '}
                     <span className={`font-medium ${getCategoryById(selectedCategory).textColor}`}>
                       {getCategoryById(selectedCategory).label}
                     </span>

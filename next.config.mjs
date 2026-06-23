@@ -55,11 +55,11 @@ const nextConfig = {
   serverExternalPackages: ['@prisma/client'],
   experimental: {
     serverActions: {
-      // 25 MB body limit for document uploads.
+      // 55 MB body limit for document uploads (supports files up to 50 MB with encoding overhead).
       // SECURITY NOTE: This is intentionally large to support PDF/DOCX uploads.
       // The actual document text size is validated server-side in
       // app/api/admin/documents/route.ts (MAX_CONTENT_CHARS constant).
-      bodySizeLimit: '25mb',
+      bodySizeLimit: '55mb',
     },
   },
 
