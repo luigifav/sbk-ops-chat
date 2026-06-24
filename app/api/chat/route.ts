@@ -177,6 +177,15 @@ export async function POST(req: NextRequest) {
       ? [lastMessage]
       : rawMessages.slice(-10)
 
+    const lastUserMessage = ([...messages].reverse().find(m => m.role === 'user')?.content ?? '')
+
+    const detectedClient: string | null =
+      /\bbradesco\b/i.test(lastUserMessage) ? 'bradesco'
+      : /\bagibank\b/i.test(lastUserMessage) ? 'agibank'
+      : /\beagle\b/i.test(lastUserMessage) ? 'eagle'
+      : /\bzurich\b/i.test(lastUserMessage) ? 'zurich'
+      : null
+
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
@@ -215,13 +224,8 @@ export async function POST(req: NextRequest) {
       console.warn('[chat] Falha ao carregar instruções fixas:', err)
     }
 
-    // Injeta instruções específicas por cliente com base em detecção
-    // de nome próprio na última mensagem do usuário
+    // Injeta instruções específicas por cliente com base na detecção de cliente
     try {
-      const lastUserMessage = [...messages]
-        .reverse()
-        .find(m => m.role === 'user')?.content ?? ''
-
       const clientInstructions: Array<{ categories: string[]; regex: RegExp }> = [
         { categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
         { categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
@@ -239,6 +243,8 @@ export async function POST(req: NextRequest) {
               .map(doc => `### ${doc.name}\n\n${doc.content}`)
               .join('\n\n---\n\n')
             systemPrompt += `\n\n## Instruções Operacionais — ${categories[0]}\n\n${clientText}`
+          } else {
+            systemPrompt += `\n\n> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`
           }
         }
       }
@@ -248,12 +254,24 @@ export async function POST(req: NextRequest) {
 
     const CONTEXT_CHAR_CAP = 80_000
 
-    const queryText = ([...messages].reverse().find((m) => m.role === 'user')?.content ?? '')
+    const queryText = lastUserMessage
+
+    // Para petições com cliente identificado, usa query focada em classificação
+    // em vez do texto completo da inicial, que tem baixa similaridade com glossários
+    const ragQueryText = (isPetition && detectedClient)
+      ? `classificação produto causa raiz subtipo tipo gestor ${detectedClient}`
+      : queryText
+
+    // Quando cliente detectado, restringe RAG ao cliente + categorias genéricas
+    // para evitar que chunks de outros clientes contaminem o contexto
+    const clientFilter = detectedClient
+      ? `AND (d.category = '${detectedClient}' OR d.category = 'instrucoes-${detectedClient}' OR d.category = 'instrucoes-fixas' OR d.category = 'geral')`
+      : ''
 
     try {
-      if (queryText) {
+      if (ragQueryText) {
         const { embedQuery } = await import('@/lib/embeddings')
-        const queryEmbedding = await embedQuery(queryText)
+        const queryEmbedding = await embedQuery(ragQueryText)
         const vectorLiteral = `[${queryEmbedding.join(',')}]`
 
         const chunks = await prisma.$queryRawUnsafe<
@@ -265,6 +283,7 @@ export async function POST(req: NextRequest) {
            FROM "DocumentChunk" dc
            JOIN "Document" d ON d.id = dc."documentId"
            WHERE d.active = true
+           ${clientFilter}
            AND (dc.embedding <=> $1::vector) < 0.35
            ORDER BY dc.embedding <=> $1::vector
            LIMIT 8`,
@@ -310,12 +329,6 @@ export async function POST(req: NextRequest) {
         if (documents.length > 0) {
           // Prioriza documentos do cliente detectado na mensagem para evitar que
           // o cap de 80K chars exclua o cliente relevante quando há muitos docs.
-          const detectedClient = /\bbradesco\b/i.test(queryText) ? 'bradesco'
-            : /\bagibank\b/i.test(queryText) ? 'agibank'
-            : /\beagle\b/i.test(queryText) ? 'eagle'
-            : /\bzurich\b/i.test(queryText) ? 'zurich'
-            : null
-
           const prioritized = detectedClient
             ? [
                 ...documents.filter(d => d.category === detectedClient || d.category === `instrucoes-${detectedClient}`),
