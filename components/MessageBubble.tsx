@@ -97,6 +97,10 @@ export default function MessageBubble({
                     {children}
                   </a>
                 ),
+                input: ({ type }: { type?: string }) =>
+                  type === 'checkbox' ? (
+                    <span className="inline-block w-3.5 h-3.5 border border-brand-turquesa/40 rounded-sm mr-1.5 align-middle flex-shrink-0" />
+                  ) : null,
                 hr: () => <hr className="border-brand-turquesa/20 my-2" />,
                 table: ({ children }) => (
                   <div className="overflow-x-auto mb-2">
