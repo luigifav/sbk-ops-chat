@@ -222,15 +222,15 @@ export async function POST(req: NextRequest) {
         .reverse()
         .find(m => m.role === 'user')?.content ?? ''
 
-      const clientInstructions: Array<{ category: string; regex: RegExp }> = [
-        { category: 'instrucoes-agibank',   regex: /\bagibank\b/i },
-        { category: 'instrucoes-bradesco',  regex: /\bbradesco\b/i },
+      const clientInstructions: Array<{ categories: string[]; regex: RegExp }> = [
+        { categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
+        { categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
       ]
 
-      for (const { category, regex } of clientInstructions) {
+      for (const { categories, regex } of clientInstructions) {
         if (regex.test(lastUserMessage)) {
           const clientDocs = await prisma.document.findMany({
-            where: { active: true, category },
+            where: { active: true, category: { in: categories } },
             orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
             select: { name: true, content: true },
           })
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
             const clientText = clientDocs
               .map(doc => `### ${doc.name}\n\n${doc.content}`)
               .join('\n\n---\n\n')
-            systemPrompt += `\n\n## Instruções Operacionais — ${category}\n\n${clientText}`
+            systemPrompt += `\n\n## Instruções Operacionais — ${categories[0]}\n\n${clientText}`
           }
         }
       }
@@ -248,10 +248,9 @@ export async function POST(req: NextRequest) {
 
     const CONTEXT_CHAR_CAP = 80_000
 
-    try {
-      const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')
-      const queryText = lastUserMessage?.content ?? ''
+    const queryText = ([...messages].reverse().find((m) => m.role === 'user')?.content ?? '')
 
+    try {
       if (queryText) {
         const { embedQuery } = await import('@/lib/embeddings')
         const queryEmbedding = await embedQuery(queryText)
@@ -305,14 +304,29 @@ export async function POST(req: NextRequest) {
         const documents = await prisma.document.findMany({
           where: { active: true },
           orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-          select: { name: true, content: true },
+          select: { name: true, content: true, category: true },
         })
 
         if (documents.length > 0) {
+          // Prioriza documentos do cliente detectado na mensagem para evitar que
+          // o cap de 80K chars exclua o cliente relevante quando há muitos docs.
+          const detectedClient = /\bbradesco\b/i.test(queryText) ? 'bradesco'
+            : /\bagibank\b/i.test(queryText) ? 'agibank'
+            : /\beagle\b/i.test(queryText) ? 'eagle'
+            : /\bzurich\b/i.test(queryText) ? 'zurich'
+            : null
+
+          const prioritized = detectedClient
+            ? [
+                ...documents.filter(d => d.category === detectedClient || d.category === `instrucoes-${detectedClient}`),
+                ...documents.filter(d => d.category !== detectedClient && d.category !== `instrucoes-${detectedClient}`),
+              ]
+            : documents
+
           let total = 0
           const selected: typeof documents = []
 
-          for (const doc of documents) {
+          for (const doc of prioritized) {
             if (total + doc.content.length > CONTEXT_CHAR_CAP) {
               console.warn(`[chat] Context cap reached at document "${doc.name}", skipping remaining`)
               break
