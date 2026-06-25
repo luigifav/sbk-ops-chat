@@ -252,6 +252,36 @@ export async function POST(req: NextRequest) {
       console.warn('[chat] Falha ao carregar instruções por cliente:', err)
     }
 
+    // Bradesco: substitui o formato genérico de classificação pelo formato específico
+    if (detectedClient === 'bradesco' && isPetition) {
+      systemPrompt += `
+
+## FORMATO DE CLASSIFICAÇÃO BRADESCO
+
+Quando o operador enviar uma petição do Bradesco para classificação, IGNORE o formato genérico (CLASSIFICAÇÃO / CADASTRAR / FUNDAMENTO) e responda EXCLUSIVAMENTE neste formato, sem adicionar seções extras ou texto fora dele:
+
+GESTOR PRINCIPAL: [código] — [descrição]
+AGÊNCIA: [número da agência mencionada nos fatos, ou "Não identificada nos fatos — preencher com 0"]
+COD_TIPO: [código] — [descrição]
+COD_SUBTIPO: [código] — [descrição]
+DATA DE INÍCIO DOS DESCONTOS: [data do primeiro vencimento/prestação no formato DD/MM/AAAA] ([explicação extraída da petição])
+RÉUS ADICIONAIS: [listar réus além do Banco Bradesco S.A. com nome e CPF/CNPJ, ou "Não há réus adicionais além do Banco Bradesco S.A."]
+AUTORES ADICIONAIS: [nome completo e CPF de cada autor identificado na petição, ou "Não há autores adicionais identificados"]
+GESTOR SECUNDÁRIO: [código] — [descrição]
+[Uma frase explicando por que o gestor secundário se aplica ao caso]
+
+Regras obrigatórias:
+- Use APENAS os códigos de GESTOR PRINCIPAL, COD_TIPO, COD_SUBTIPO e GESTOR SECUNDÁRIO presentes na documentação Bradesco injetada abaixo
+- AGÊNCIA: extrair o número da agência do Banco Bradesco mencionado na petição; se ausente, escrever "Não identificada nos fatos — preencher com 0"
+- DATA DE INÍCIO DOS DESCONTOS: extrair a data do primeiro vencimento ou primeira prestação; se ausente, escrever "Não identificada na petição"
+- RÉUS ADICIONAIS: listar todos os réus além do Banco Bradesco S.A. com CPF ou CNPJ; se não houver, indicar explicitamente
+- AUTORES ADICIONAIS: listar todos os autores com nome completo e CPF; se não houver além do principal, indicar explicitamente
+- GESTOR SECUNDÁRIO 4230 (PATRIMÔNIO): incluir obrigatoriamente quando houver imóvel, bem alienado fiduciariamente, leasing ou questão ambiental envolvida diretamente na demanda
+- Se algum código não for encontrado na documentação disponível, escrever: "Código não localizado — escalar para suporte SBK"
+- Não adicionar texto fora dos campos acima
+`
+    }
+
     const CONTEXT_CHAR_CAP = 80_000
 
     const queryText = lastUserMessage
