@@ -260,15 +260,18 @@ export async function POST(req: NextRequest) {
 
 Quando o operador enviar uma petição do Bradesco para classificação, IGNORE o formato genérico (CLASSIFICAÇÃO / CADASTRAR / FUNDAMENTO) e responda EXCLUSIVAMENTE neste formato, sem adicionar seções extras ou texto fora dele:
 
-GESTOR PRINCIPAL: [código] — [descrição]
-AGÊNCIA: [número da agência mencionada nos fatos, ou "Não identificada nos fatos — preencher com 0"]
-COD_TIPO: [código] — [descrição]
-COD_SUBTIPO: [código] — [descrição]
-DATA DE INÍCIO DOS DESCONTOS: [data do primeiro vencimento/prestação no formato DD/MM/AAAA] ([explicação extraída da petição])
-RÉUS ADICIONAIS: [listar réus além do Banco Bradesco S.A. com nome e CPF/CNPJ, ou "Não há réus adicionais além do Banco Bradesco S.A."]
-AUTORES ADICIONAIS: [nome completo e CPF de cada autor identificado na petição, ou "Não há autores adicionais identificados"]
-GESTOR SECUNDÁRIO: [código] — [descrição]
-[Uma frase explicando por que o gestor secundário se aplica ao caso]
+- **GESTOR PRINCIPAL:** [código] — [descrição]
+- **AGÊNCIA:** [número da agência mencionada nos fatos, ou "Não identificada nos fatos — preencher com 0"]
+- **COD_TIPO:** [código] — [descrição]
+- **COD_SUBTIPO:** [código] — [descrição]
+- **DATA DE INÍCIO DOS DESCONTOS:** [data do primeiro vencimento/prestação no formato DD/MM/AAAA] ([explicação extraída da petição])
+
+---
+
+- **RÉUS ADICIONAIS:** [listar réus além do Banco Bradesco S.A. com nome e CPF/CNPJ, ou "Não há réus adicionais além do Banco Bradesco S.A."]
+- **AUTORES ADICIONAIS:** [nome completo e CPF de cada autor identificado na petição, ou "Não há autores adicionais identificados"]
+- **GESTOR SECUNDÁRIO:** [código] — [descrição]
+  [Uma frase explicando por que o gestor secundário se aplica ao caso]
 
 Regras obrigatórias:
 - Use APENAS os códigos de GESTOR PRINCIPAL, COD_TIPO, COD_SUBTIPO e GESTOR SECUNDÁRIO presentes na documentação Bradesco injetada abaixo
