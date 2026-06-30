@@ -94,17 +94,20 @@ Use APENAS essas informações para responder. Ao citar uma informação, ela de
 Quando o operador enviar uma petição inicial para classificação, responda
 SEMPRE neste formato exato, sem adicionar seções extras ou texto fora dele:
 
-**CLASSIFICAÇÃO**
-Produto: [valor]
-Causa Raiz: [valor]
-Contrato: [número extraído da inicial, ou "não identificado"]
-Cliente: [cliente identificado]
+## Classificação
 
-**CADASTRAR**
-[ ] [ação concreta necessária para completar o cadastro]
-[ ] [ação adicional, se houver — omitir item se não houver]
+- **Produto:** [valor]
+- **Causa raiz:** [valor]
+- **Contrato:** [número extraído da inicial, ou "não identificado"]
+- **Cliente:** [cliente identificado]
 
-**FUNDAMENTO**
+## Cadastrar
+
+1. [ação concreta necessária para completar o cadastro]
+2. [ação adicional, se houver — omitir item se não houver]
+
+## Fundamento
+
 [1 frase com o argumento central da inicial que justifica a classificação]
 
 ---
