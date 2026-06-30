@@ -4,7 +4,7 @@ import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
 import { classifyAndSaveTheme } from '@/lib/theme'
-import { CLIENT_IDS } from '@/lib/categories'
+import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 
 export const dynamic = 'force-dynamic'
 
@@ -290,7 +290,7 @@ export async function POST(req: NextRequest) {
     // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude a avisar
     if (clientMismatchNote) {
       const CLIENT_DISPLAY: Record<string, string> = {
-        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich',
+        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
       }
       const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
       const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
@@ -302,6 +302,7 @@ export async function POST(req: NextRequest) {
       const clientInstructions: Array<{ clientId: string; categories: string[]; regex: RegExp }> = [
         { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
         { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
+        { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'],           regex: /\bcwt\b/i },
       ]
 
       for (const { clientId, categories, regex } of clientInstructions) {
@@ -372,10 +373,11 @@ Regras obrigatórias:
 
     // Restringe RAG ao cliente efetivo (ou à união dos clientes do operador quando não há
     // cliente específico determinado), para evitar contaminação cruzada entre clientes.
+    const globalCategoryFilter = GLOBAL_CATEGORIES.map(c => `d.category = '${c}'`).join(' OR ')
     const clientFilter = effectiveClient
-      ? `AND (d.category = '${effectiveClient}' OR d.category = 'instrucoes-${effectiveClient}' OR d.category = 'instrucoes-fixas' OR d.category = 'geral')`
+      ? `AND (d.category = '${effectiveClient}' OR d.category = 'instrucoes-${effectiveClient}' OR ${globalCategoryFilter})`
       : operatorClients.length > 0
-        ? `AND (${operatorClients.map(c => `d.category = '${c}' OR d.category = 'instrucoes-${c}'`).join(' OR ')} OR d.category = 'instrucoes-fixas' OR d.category = 'geral')`
+        ? `AND (${operatorClients.map(c => `d.category = '${c}' OR d.category = 'instrucoes-${c}'`).join(' OR ')} OR ${globalCategoryFilter})`
         : ''
 
     try {
