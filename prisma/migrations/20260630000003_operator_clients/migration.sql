@@ -1,0 +1,2 @@
+ALTER TABLE "Operator"
+  ADD COLUMN IF NOT EXISTS "clients" TEXT[] NOT NULL DEFAULT '{}';

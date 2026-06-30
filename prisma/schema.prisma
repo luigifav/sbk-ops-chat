@@ -64,5 +64,6 @@ model Operator {
   password  String
   active    Boolean  @default(true)
   status    String   @default("active")
+  clients   String[] @default([])
   createdAt DateTime @default(now())
 }

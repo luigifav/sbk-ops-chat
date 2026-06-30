@@ -89,3 +89,13 @@ export const CATEGORIES: Category[] = [
 export function getCategoryById(id: string): Category {
   return CATEGORIES.find((c) => c.id === id) ?? CATEGORIES[4] // fallback to 'geral'
 }
+
+export const CLIENT_IDS = ['bradesco', 'agibank', 'eagle', 'zurich'] as const
+export type ClientId = typeof CLIENT_IDS[number]
+
+export const CLIENT_LABELS: Record<ClientId, string> = {
+  bradesco: 'Bradesco',
+  agibank: 'Agibank',
+  eagle: 'Eagle',
+  zurich: 'Zurich',
+}
