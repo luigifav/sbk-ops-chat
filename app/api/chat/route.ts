@@ -252,6 +252,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // For analytics: when effectiveClient could not be determined from the message text,
+    // fall back to the operator's primary assigned client so the analytics chart
+    // "Perguntas por cliente detectado" can classify the question instead of grouping
+    // it under "Não identificado". This does not affect RAG scoping (effectiveClient).
+    const analyticsClient: string | null = effectiveClient ?? (operatorClients[0] ?? null)
+
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
@@ -557,7 +563,7 @@ Regras obrigatórias:
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
-                detectedClient: effectiveClient,
+                detectedClient: analyticsClient,
                 ragFallback: usedFallback,
                 ragTopScore,
               },
