@@ -232,12 +232,17 @@ export async function POST(req: NextRequest) {
     //   - Otherwise keep detectedClient (which may be null).
     // Operators with no assigned clients (empty array) have no restriction.
     let effectiveClient: string | null = detectedClient
+    let clientMismatchNote: string | null = null
     if (operatorClients.length > 0) {
       if (detectedClient && operatorClients.includes(detectedClient)) {
         effectiveClient = detectedClient
       } else if (operatorClients.length === 1) {
         // Auto-assume the operator's single client even when not mentioned in the text
         effectiveClient = operatorClients[0]
+        // Inform the operator when their message mentioned a different client
+        if (detectedClient && detectedClient !== operatorClients[0]) {
+          clientMismatchNote = detectedClient
+        }
       } else {
         // Multiple allowed clients, but detected client is not among them (or null)
         effectiveClient = null
@@ -280,6 +285,16 @@ export async function POST(req: NextRequest) {
       }
     } catch (err) {
       console.warn('[chat] Falha ao carregar instruções fixas:', err)
+    }
+
+    // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude a avisar
+    if (clientMismatchNote) {
+      const CLIENT_DISPLAY: Record<string, string> = {
+        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich',
+      }
+      const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
+      const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
+      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
     }
 
     // Injeta instruções específicas por cliente com base no cliente efetivo
