@@ -395,7 +395,7 @@ function AnalyticsPanel() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" />
                   <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#4B4B4B' }} />
                   <YAxis tick={{ fontSize: 11, fill: '#4B4B4B' }} tickFormatter={(v) => `$${v}`} />
-                  <Tooltip formatter={(v: number) => [`$${v.toFixed(4)}`, 'Custo']} />
+                  <Tooltip formatter={(v) => [`$${Number(v).toFixed(4)}`, 'Custo']} />
                   <Line
                     type="monotone"
                     dataKey="custo"
