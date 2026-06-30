@@ -9,14 +9,18 @@ datasource db {
 }
 
 model Message {
-  id             String   @id @default(cuid())
-  question       String
-  answer         String
-  sessionId      String
-  responseTimeMs Int
-  createdAt      DateTime @default(now())
-  operatorName   String   @default("Anônimo")
-  theme          String?
+  id                   String   @id @default(cuid())
+  question             String
+  answer               String
+  sessionId            String
+  responseTimeMs       Int
+  createdAt            DateTime @default(now())
+  operatorName         String   @default("Anônimo")
+  theme                String?
+  inputTokens          Int?
+  outputTokens         Int?
+  cacheReadTokens      Int?
+  cacheCreationTokens  Int?
 }
 
 model Setting {

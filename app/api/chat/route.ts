@@ -399,6 +399,10 @@ Regras obrigatórias:
     const startTime = Date.now()
     const encoder = new TextEncoder()
     let fullResponse = ''
+    let inputTokens: number | null = null
+    let outputTokens: number | null = null
+    let cacheReadTokens: number | null = null
+    let cacheCreationTokens: number | null = null
 
     // AbortController enforces a hard timeout on the Anthropic stream.
     // If the API stalls, the stream is aborted after STREAM_TIMEOUT_MS.
@@ -438,7 +442,13 @@ Regras obrigatórias:
           )
 
           for await (const event of stream) {
-            if (
+            if (event.type === 'message_start') {
+              inputTokens = event.message.usage.input_tokens
+              cacheReadTokens = event.message.usage.cache_read_input_tokens ?? null
+              cacheCreationTokens = event.message.usage.cache_creation_input_tokens ?? null
+            } else if (event.type === 'message_delta') {
+              outputTokens = event.usage.output_tokens
+            } else if (
               event.type === 'content_block_delta' &&
               event.delta.type === 'text_delta'
             ) {
@@ -458,6 +468,10 @@ Regras obrigatórias:
                 sessionId: validSessionId,
                 responseTimeMs,
                 operatorName,
+                inputTokens,
+                outputTokens,
+                cacheReadTokens,
+                cacheCreationTokens,
               },
             })
           } catch {
