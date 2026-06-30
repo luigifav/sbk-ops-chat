@@ -29,17 +29,20 @@ export async function GET(req: NextRequest) {
   const operatorName = searchParams.get('operator') ?? null
 
   const now = new Date()
-  let startDate: Date | undefined
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  let dateRange: { gte?: Date; lt?: Date } = {}
   if (period === 'today') {
-    startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    dateRange = { gte: todayStart }
+  } else if (period === 'yesterday') {
+    dateRange = { gte: new Date(todayStart.getTime() - 24 * 60 * 60 * 1000), lt: todayStart }
   } else if (period === '7days') {
-    startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    dateRange = { gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) }
   } else if (period === '30days') {
-    startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    dateRange = { gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
   }
 
   const where = {
-    ...(startDate ? { createdAt: { gte: startDate } } : {}),
+    ...(Object.keys(dateRange).length > 0 ? { createdAt: dateRange } : {}),
     ...(operatorName ? { operatorName } : {}),
   }
 

@@ -10,20 +10,25 @@ async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   return verifyToken(adminToken, process.env.ADMIN_PASSWORD!, process.env.AUTH_SECRET!)
 }
 
-type Period = 'today' | '7days' | '30days' | 'all'
+type Period = 'today' | 'yesterday' | '7days' | '30days' | 'all'
 
-function getStartDate(period: Period): Date | undefined {
+function getDateRange(period: Period): { gte?: Date; lt?: Date } {
   const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   if (period === 'today') {
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    return { gte: todayStart }
+  }
+  if (period === 'yesterday') {
+    const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000)
+    return { gte: yesterdayStart, lt: todayStart }
   }
   if (period === '7days') {
-    return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    return { gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) }
   }
   if (period === '30days') {
-    return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    return { gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
   }
-  return undefined
+  return {}
 }
 
 function escapeCsvField(value: string): string {
@@ -46,10 +51,10 @@ export async function GET(req: NextRequest) {
   const search = rawSearch.slice(0, MAX_SEARCH_LENGTH)
   const exportCsv = searchParams.get('export') === 'csv'
 
-  const startDate = getStartDate(period)
+  const dateRange = getDateRange(period)
 
   const where = {
-    ...(startDate ? { createdAt: { gte: startDate } } : {}),
+    ...(Object.keys(dateRange).length > 0 ? { createdAt: dateRange } : {}),
     ...(search
       ? { question: { contains: search, mode: 'insensitive' as const } }
       : {}),

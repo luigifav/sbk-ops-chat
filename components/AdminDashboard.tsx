@@ -34,11 +34,12 @@ interface Stats {
   total: number
 }
 
-type Period = 'today' | '7days' | '30days' | 'all'
+type Period = 'today' | 'yesterday' | '7days' | '30days' | 'all'
 type Tab = 'messages' | 'analytics' | 'operators' | 'settings'
 
 const PERIOD_LABELS: Record<Period, string> = {
   today: 'Hoje',
+  yesterday: 'Ontem',
   '7days': '7 dias',
   '30days': '30 dias',
   all: 'Todos',
@@ -94,10 +95,11 @@ interface CostData {
 
 
 function AnalyticsPanel() {
-  type AnalyticsPeriod = 'today' | '7days' | '30days' | 'all'
+  type AnalyticsPeriod = 'today' | 'yesterday' | '7days' | '30days' | 'all'
 
   const ANALYTICS_PERIOD_LABELS: Record<AnalyticsPeriod, string> = {
     today: 'Hoje',
+    yesterday: 'Ontem',
     '7days': '7 dias',
     '30days': '30 dias',
     all: 'Todos',
