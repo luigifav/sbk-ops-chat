@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
+import { CLIENT_IDS } from '@/lib/categories'
 import bcrypt from 'bcryptjs'
 
 export const dynamic = 'force-dynamic'
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
 
   const operators = await prisma.operator.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, name: true, active: true, status: true, createdAt: true },
+    select: { id: true, name: true, active: true, status: true, clients: true, createdAt: true },
   })
 
   return NextResponse.json({ operators })
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { name, password } = body as { name?: string; password?: string }
+  const { name, password, clients } = body as { name?: string; password?: string; clients?: string[] }
 
   if (!name?.trim() || !password) {
     return NextResponse.json({ error: 'Nome e senha obrigatórios' }, { status: 400 })
@@ -59,6 +60,8 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  const validClients = (clients ?? []).filter((c): c is string => CLIENT_IDS.includes(c as never))
+
   const existing = await prisma.operator.findFirst({
     where: { name: { equals: name.trim(), mode: 'insensitive' } },
   })
@@ -69,8 +72,8 @@ export async function POST(req: NextRequest) {
 
   const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS)
   const operator = await prisma.operator.create({
-    data: { name: name.trim(), password: hashedPassword },
-    select: { id: true, name: true, active: true, status: true, createdAt: true },
+    data: { name: name.trim(), password: hashedPassword, clients: validClients },
+    select: { id: true, name: true, active: true, status: true, clients: true, createdAt: true },
   })
 
   return NextResponse.json({ operator }, { status: 201 })
@@ -82,11 +85,12 @@ export async function PATCH(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { id, active, password, status } = body as {
+  const { id, active, password, status, clients } = body as {
     id?: string
     active?: boolean
     password?: string
     status?: string
+    clients?: string[]
   }
 
   if (!id) {
@@ -100,15 +104,16 @@ export async function PATCH(req: NextRequest) {
     )
   }
 
-  const data: { active?: boolean; password?: string; status?: string } = {}
+  const data: { active?: boolean; password?: string; status?: string; clients?: string[] } = {}
   if (active !== undefined) data.active = active
   if (status !== undefined) data.status = status
   if (password) data.password = await bcrypt.hash(password, BCRYPT_ROUNDS)
+  if (clients !== undefined) data.clients = clients.filter((c): c is string => CLIENT_IDS.includes(c as never))
 
   const operator = await prisma.operator.update({
     where: { id },
     data,
-    select: { id: true, name: true, active: true, status: true, createdAt: true },
+    select: { id: true, name: true, active: true, status: true, clients: true, createdAt: true },
   })
 
   return NextResponse.json({ operator })

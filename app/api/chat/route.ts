@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
 import { classifyAndSaveTheme } from '@/lib/theme'
+import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 
 export const dynamic = 'force-dynamic'
 
@@ -151,6 +152,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  // Resolve per-operator client permissions using the httpOnly sbk_operator_id cookie.
+  // Falls back to empty (no restriction) if the cookie is absent or the operator is not found.
+  let operatorClients: string[] = []
+  const operatorId = req.cookies.get('sbk_operator_id')?.value
+  if (operatorId) {
+    try {
+      const op = await prisma.operator.findUnique({
+        where: { id: operatorId },
+        select: { clients: true },
+      })
+      operatorClients = (op?.clients ?? []).filter((c): c is string => CLIENT_IDS.includes(c as never))
+    } catch {
+      // Non-fatal: proceed without client scoping
+    }
+  }
+
   // Rate-limit chat by operator name (falls back to 'Anônimo' for unknown)
   const rl = checkRateLimit(`chat:${operatorName}`, CHAT_LIMIT, CHAT_WINDOW)
   if (!rl.allowed) {
@@ -208,6 +225,30 @@ export async function POST(req: NextRequest) {
       : /\bzurich\b/i.test(lastUserMessage) ? 'zurich'
       : null
 
+    // Resolve the effective client for RAG and system prompt scoping.
+    // If the operator has assigned clients, they take precedence over text detection:
+    //   - If the detected client is in the operator's list, use it.
+    //   - If the operator has exactly one client, auto-assume it regardless of what's in the text.
+    //   - Otherwise keep detectedClient (which may be null).
+    // Operators with no assigned clients (empty array) have no restriction.
+    let effectiveClient: string | null = detectedClient
+    let clientMismatchNote: string | null = null
+    if (operatorClients.length > 0) {
+      if (detectedClient && operatorClients.includes(detectedClient)) {
+        effectiveClient = detectedClient
+      } else if (operatorClients.length === 1) {
+        // Auto-assume the operator's single client even when not mentioned in the text
+        effectiveClient = operatorClients[0]
+        // Inform the operator when their message mentioned a different client
+        if (detectedClient && detectedClient !== operatorClients[0]) {
+          clientMismatchNote = detectedClient
+        }
+      } else {
+        // Multiple allowed clients, but detected client is not among them (or null)
+        effectiveClient = null
+      }
+    }
+
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages required' }, { status: 400 })
     }
@@ -246,15 +287,26 @@ export async function POST(req: NextRequest) {
       console.warn('[chat] Falha ao carregar instruções fixas:', err)
     }
 
-    // Injeta instruções específicas por cliente com base na detecção de cliente
+    // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude a avisar
+    if (clientMismatchNote) {
+      const CLIENT_DISPLAY: Record<string, string> = {
+        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
+      }
+      const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
+      const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
+      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
+    }
+
+    // Injeta instruções específicas por cliente com base no cliente efetivo
     try {
-      const clientInstructions: Array<{ categories: string[]; regex: RegExp }> = [
-        { categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
-        { categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
+      const clientInstructions: Array<{ clientId: string; categories: string[]; regex: RegExp }> = [
+        { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
+        { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
+        { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'],           regex: /\bcwt\b/i },
       ]
 
-      for (const { categories, regex } of clientInstructions) {
-        if (regex.test(lastUserMessage)) {
+      for (const { clientId, categories, regex } of clientInstructions) {
+        if (regex.test(lastUserMessage) || effectiveClient === clientId) {
           const clientDocs = await prisma.document.findMany({
             where: { active: true, category: { in: categories } },
             orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
@@ -275,7 +327,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Bradesco: substitui o formato genérico de classificação pelo formato específico
-    if (detectedClient === 'bradesco' && isPetition) {
+    if (effectiveClient === 'bradesco' && isPetition) {
       systemPrompt += `
 
 ## FORMATO DE CLASSIFICAÇÃO BRADESCO
@@ -315,15 +367,18 @@ Regras obrigatórias:
 
     // Para petições com cliente identificado, usa query focada em classificação
     // em vez do texto completo da inicial, que tem baixa similaridade com glossários
-    const ragQueryText = (isPetition && detectedClient)
-      ? `classificação produto causa raiz subtipo tipo gestor ${detectedClient}`
+    const ragQueryText = (isPetition && effectiveClient)
+      ? `classificação produto causa raiz subtipo tipo gestor ${effectiveClient}`
       : queryText
 
-    // Quando cliente detectado, restringe RAG ao cliente + categorias genéricas
-    // para evitar que chunks de outros clientes contaminem o contexto
-    const clientFilter = detectedClient
-      ? `AND (d.category = '${detectedClient}' OR d.category = 'instrucoes-${detectedClient}' OR d.category = 'instrucoes-fixas' OR d.category = 'geral')`
-      : ''
+    // Restringe RAG ao cliente efetivo (ou à união dos clientes do operador quando não há
+    // cliente específico determinado), para evitar contaminação cruzada entre clientes.
+    const globalCategoryFilter = GLOBAL_CATEGORIES.map(c => `d.category = '${c}'`).join(' OR ')
+    const clientFilter = effectiveClient
+      ? `AND (d.category = '${effectiveClient}' OR d.category = 'instrucoes-${effectiveClient}' OR ${globalCategoryFilter})`
+      : operatorClients.length > 0
+        ? `AND (${operatorClients.map(c => `d.category = '${c}' OR d.category = 'instrucoes-${c}'`).join(' OR ')} OR ${globalCategoryFilter})`
+        : ''
 
     try {
       if (ragQueryText) {
@@ -386,12 +441,12 @@ Regras obrigatórias:
         })
 
         if (documents.length > 0) {
-          // Prioriza documentos do cliente detectado na mensagem para evitar que
-          // o cap de 80K chars exclua o cliente relevante quando há muitos docs.
-          const prioritized = detectedClient
+          // Prioriza documentos do cliente efetivo para evitar que o cap de 80K chars
+          // exclua o cliente relevante quando há muitos docs.
+          const prioritized = effectiveClient
             ? [
-                ...documents.filter(d => d.category === detectedClient || d.category === `instrucoes-${detectedClient}`),
-                ...documents.filter(d => d.category !== detectedClient && d.category !== `instrucoes-${detectedClient}`),
+                ...documents.filter(d => d.category === effectiveClient || d.category === `instrucoes-${effectiveClient}`),
+                ...documents.filter(d => d.category !== effectiveClient && d.category !== `instrucoes-${effectiveClient}`),
               ]
             : documents
 
@@ -499,7 +554,7 @@ Regras obrigatórias:
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
-                detectedClient,
+                detectedClient: effectiveClient,
                 ragFallback: usedFallback,
                 ragTopScore,
               },

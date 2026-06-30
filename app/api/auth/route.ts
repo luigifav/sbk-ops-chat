@@ -183,6 +183,16 @@ export async function POST(req: NextRequest) {
       path: '/',
     })
 
+    // httpOnly cookie carrying the operator's DB id so the chat route can look
+    // up per-operator client permissions without trusting the non-httpOnly name cookie.
+    response.cookies.set('sbk_operator_id', operator.id, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 60 * 60 * 8,
+      path: '/',
+    })
+
     return response
   } catch {
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
@@ -193,5 +203,6 @@ export async function DELETE() {
   const response = NextResponse.json({ success: true })
   response.cookies.set('sbk_auth_token', '', { maxAge: 0, path: '/' })
   response.cookies.set('sbk_operator_name', '', { maxAge: 0, path: '/' })
+  response.cookies.set('sbk_operator_id', '', { maxAge: 0, path: '/' })
   return response
 }

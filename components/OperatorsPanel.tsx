@@ -1,13 +1,22 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { CLIENT_IDS, CLIENT_LABELS } from '@/lib/categories'
 
 interface OperatorItem {
   id: string
   name: string
   active: boolean
   status: string
+  clients: string[]
   createdAt: string
+}
+
+const CLIENT_COLORS: Record<string, string> = {
+  bradesco: 'bg-red-100 text-red-700',
+  agibank: 'bg-blue-100 text-blue-700',
+  eagle: 'bg-purple-100 text-purple-700',
+  zurich: 'bg-orange-100 text-orange-700',
 }
 
 export default function OperatorsPanel() {
@@ -15,11 +24,15 @@ export default function OperatorsPanel() {
   const [loading, setLoading] = useState(true)
   const [newName, setNewName] = useState('')
   const [newPassword, setNewPassword] = useState('')
+  const [newClients, setNewClients] = useState<string[]>([])
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [resetId, setResetId] = useState<string | null>(null)
   const [resetPassword, setResetPassword] = useState('')
   const [resetting, setResetting] = useState(false)
+  const [editClientsId, setEditClientsId] = useState<string | null>(null)
+  const [editClients, setEditClients] = useState<string[]>([])
+  const [savingClients, setSavingClients] = useState(false)
 
   async function loadOperators() {
     const res = await fetch('/api/admin/operators')
@@ -40,15 +53,39 @@ export default function OperatorsPanel() {
       const res = await fetch('/api/admin/operators', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName.trim(), password: newPassword }),
+        body: JSON.stringify({ name: newName.trim(), password: newPassword, clients: newClients }),
       })
       const data = await res.json()
       if (!res.ok) { setError(data.error ?? 'Erro ao criar operador'); return }
       setNewName('')
       setNewPassword('')
+      setNewClients([])
       await loadOperators()
     } finally {
       setCreating(false)
+    }
+  }
+
+  function toggleNewClient(clientId: string) {
+    setNewClients((prev) =>
+      prev.includes(clientId) ? prev.filter((c) => c !== clientId) : [...prev, clientId]
+    )
+  }
+
+  async function handleSaveClients(id: string) {
+    setSavingClients(true)
+    try {
+      await fetch('/api/admin/operators', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, clients: editClients }),
+      })
+      setOperators((prev) =>
+        prev.map((o) => (o.id === id ? { ...o, clients: editClients } : o))
+      )
+      setEditClientsId(null)
+    } finally {
+      setSavingClients(false)
     }
   }
 
@@ -182,6 +219,27 @@ export default function OperatorsPanel() {
             {creating ? 'Criando...' : 'Criar'}
           </button>
         </div>
+        <div className="mt-3">
+          <p className="text-xs text-gray-500 mb-2">Clientes permitidos (deixe em branco para acesso geral):</p>
+          <div className="flex flex-wrap gap-2">
+            {CLIENT_IDS.map((clientId) => {
+              const checked = newClients.includes(clientId)
+              return (
+                <label key={clientId} className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleNewClient(clientId)}
+                    className="w-3.5 h-3.5 rounded border-gray-300 accent-primary"
+                  />
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${checked ? CLIENT_COLORS[clientId] : 'bg-gray-100 text-gray-500'}`}>
+                    {CLIENT_LABELS[clientId as keyof typeof CLIENT_LABELS]}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
         {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
       </div>
 
@@ -202,7 +260,17 @@ export default function OperatorsPanel() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-gray-900">{op.name}</p>
-                    <p className="text-xs text-gray-400">Criado em {formatDate(op.createdAt)}</p>
+                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      {op.clients.length === 0 ? (
+                        <span className="text-xs text-gray-400">Todos os clientes</span>
+                      ) : (
+                        op.clients.map((c) => (
+                          <span key={c} className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${CLIENT_COLORS[c] ?? 'bg-gray-100 text-gray-500'}`}>
+                            {CLIENT_LABELS[c as keyof typeof CLIENT_LABELS] ?? c}
+                          </span>
+                        ))
+                      )}
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -216,7 +284,25 @@ export default function OperatorsPanel() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setResetId(resetId === op.id ? null : op.id)}
+                    onClick={() => {
+                      if (editClientsId === op.id) {
+                        setEditClientsId(null)
+                      } else {
+                        setEditClients(op.clients)
+                        setEditClientsId(op.id)
+                        setResetId(null)
+                      }
+                    }}
+                    title="Editar clientes"
+                    className={`p-1.5 transition-colors ${editClientsId === op.id ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v1h8v-1zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-1a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v1h-3zM4.75 14.094A5.973 5.973 0 004 17v1H1v-1a3 3 0 013.75-2.906z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setResetId(resetId === op.id ? null : op.id); setEditClientsId(null) }}
                     title="Redefinir senha"
                     className="p-1.5 text-gray-300 hover:text-primary transition-colors"
                   >
@@ -234,6 +320,48 @@ export default function OperatorsPanel() {
                     </svg>
                   </button>
                 </div>
+                {editClientsId === op.id && (
+                  <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
+                    <p className="text-xs text-gray-500 mb-2">Clientes permitidos (deixe em branco para acesso geral):</p>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {CLIENT_IDS.map((clientId) => {
+                        const checked = editClients.includes(clientId)
+                        return (
+                          <label key={clientId} className="flex items-center gap-1.5 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setEditClients((prev) =>
+                                  prev.includes(clientId) ? prev.filter((c) => c !== clientId) : [...prev, clientId]
+                                )
+                              }
+                              className="w-3.5 h-3.5 rounded border-gray-300 accent-primary"
+                            />
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${checked ? CLIENT_COLORS[clientId] : 'bg-gray-100 text-gray-500'}`}>
+                              {CLIENT_LABELS[clientId as keyof typeof CLIENT_LABELS]}
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleSaveClients(op.id)}
+                        disabled={savingClients}
+                        className="px-3 py-2 bg-primary text-white text-sm rounded-lg disabled:opacity-50 transition-colors"
+                      >
+                        {savingClients ? 'Salvando...' : 'Salvar'}
+                      </button>
+                      <button
+                        onClick={() => setEditClientsId(null)}
+                        className="px-3 py-2 border border-gray-200 text-sm rounded-lg hover:bg-gray-100 transition-colors"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {resetId === op.id && (
                   <div className="px-4 py-3 border-t border-gray-100 bg-gray-50 flex gap-2">
                     <input

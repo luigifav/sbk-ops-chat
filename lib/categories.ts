@@ -89,3 +89,17 @@ export const CATEGORIES: Category[] = [
 export function getCategoryById(id: string): Category {
   return CATEGORIES.find((c) => c.id === id) ?? CATEGORIES[4] // fallback to 'geral'
 }
+
+export const CLIENT_IDS = ['bradesco', 'agibank', 'eagle', 'zurich', 'cwt'] as const
+export type ClientId = typeof CLIENT_IDS[number]
+
+export const CLIENT_LABELS: Record<ClientId, string> = {
+  bradesco: 'Bradesco',
+  agibank: 'Agibank',
+  eagle: 'Eagle',
+  zurich: 'Zurich',
+  cwt: 'CWT',
+}
+
+// Categories that are always available regardless of operator client scope
+export const GLOBAL_CATEGORIES = ['instrucoes-fixas', 'geral', 'rh', 'processos-internos'] as const
