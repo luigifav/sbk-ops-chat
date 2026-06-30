@@ -41,12 +41,33 @@ export default function Chat({ chips }: ChatProps) {
   const [operatorName, setOperatorName] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const IDLE_TIMEOUT_MS = 5 * 60 * 1_000
 
   useEffect(() => {
     setSessionId(getOrCreateSessionId())
     const match = document.cookie.match(/sbk_operator_name=([^;]+)/)
     if (match) setOperatorName(decodeURIComponent(match[1]))
+    return () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+    }
   }, [])
+
+  const resetIdleSession = useCallback(() => {
+    const newId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : randomId()
+    sessionStorage.setItem('sbk_session_id', newId)
+    setSessionId(newId)
+    setMessages([])
+  }, [])
+
+  const armIdleTimer = useCallback(() => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+    idleTimerRef.current = setTimeout(resetIdleSession, IDLE_TIMEOUT_MS)
+  }, [resetIdleSession, IDLE_TIMEOUT_MS])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -55,6 +76,7 @@ export default function Chat({ chips }: ChatProps) {
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim() || isStreaming) return
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
 
       const userMsg: Message = { id: randomId(), role: 'user', content: text.trim() }
       const assistantMsg: Message = {
@@ -130,9 +152,10 @@ export default function Chat({ chips }: ChatProps) {
           }
           return updated
         })
+        armIdleTimer()
       }
     },
-    [messages, sessionId, isStreaming]
+    [messages, sessionId, isStreaming, armIdleTimer]
   )
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
