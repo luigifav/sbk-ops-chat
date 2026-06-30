@@ -4,8 +4,9 @@ import { verifyToken } from '@/lib/auth'
 
 export async function PATCH(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params
   const authToken = req.cookies.get('sbk_auth_token')?.value
   if (!authToken) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -28,7 +29,7 @@ export async function PATCH(
 
   try {
     await prisma.message.update({
-      where: { id: params.id },
+      where: { id },
       data: { feedback: feedback as number | null },
     })
     return NextResponse.json({ ok: true })
