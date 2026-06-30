@@ -1,0 +1,3 @@
+ALTER TABLE "Message"
+  ADD COLUMN IF NOT EXISTS "detectedClient" TEXT,
+  ADD COLUMN IF NOT EXISTS "feedback"       INTEGER;

@@ -9,6 +9,10 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   streaming?: boolean
+  thinking?: boolean
+  dbId?: string
+  feedback?: 1 | -1 | null
+  isError?: boolean
 }
 
 interface ChatProps {
@@ -42,6 +46,7 @@ export default function Chat({ chips }: ChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastUserTextRef = useRef<string>('')
 
   const IDLE_TIMEOUT_MS = 5 * 60 * 1_000
 
@@ -73,10 +78,34 @@ export default function Chat({ chips }: ChatProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const handleFeedback = useCallback(async (dbId: string, value: 1 | -1 | null) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.dbId === dbId ? { ...m, feedback: value } : m))
+    )
+    try {
+      await fetch(`/api/messages/${dbId}/feedback`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback: value }),
+      })
+    } catch {
+      // revert on failure
+      setMessages((prev) =>
+        prev.map((m) => (m.dbId === dbId ? { ...m, feedback: undefined } : m))
+      )
+    }
+  }, [])
+
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim() || isStreaming) return
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+      lastUserTextRef.current = text.trim()
+
+      const dbId =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : randomId()
 
       const userMsg: Message = { id: randomId(), role: 'user', content: text.trim() }
       const assistantMsg: Message = {
@@ -84,6 +113,8 @@ export default function Chat({ chips }: ChatProps) {
         role: 'assistant',
         content: '',
         streaming: true,
+        thinking: true,
+        dbId,
       }
 
       const conversationHistory = messages.map(({ role, content }) => ({ role, content }))
@@ -101,7 +132,7 @@ export default function Chat({ chips }: ChatProps) {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: nextHistory, sessionId }),
+          body: JSON.stringify({ messages: nextHistory, sessionId, messageId: dbId }),
         })
 
         if (!res.ok || !res.body) {
@@ -123,6 +154,7 @@ export default function Chat({ chips }: ChatProps) {
               updated[updated.length - 1] = {
                 ...last,
                 content: last.content + chunk,
+                thinking: false,
               }
             }
             return updated
@@ -138,6 +170,8 @@ export default function Chat({ chips }: ChatProps) {
               content:
                 'Desculpe, ocorreu um erro ao processar sua mensagem. Tente novamente.',
               streaming: false,
+              thinking: false,
+              isError: true,
             }
           }
           return updated
@@ -148,7 +182,7 @@ export default function Chat({ chips }: ChatProps) {
           const updated = [...prev]
           const last = updated[updated.length - 1]
           if (last.role === 'assistant') {
-            updated[updated.length - 1] = { ...last, streaming: false }
+            updated[updated.length - 1] = { ...last, streaming: false, thinking: false }
           }
           return updated
         })
@@ -247,6 +281,12 @@ export default function Chat({ chips }: ChatProps) {
                 role={msg.role}
                 content={msg.content}
                 isStreaming={msg.streaming}
+                thinking={msg.thinking}
+                messageDbId={msg.dbId}
+                feedback={msg.feedback}
+                onFeedback={handleFeedback}
+                isError={msg.isError}
+                onRetry={msg.isError ? () => sendMessage(lastUserTextRef.current) : undefined}
               />
             ))}
             <div ref={messagesEndRef} />

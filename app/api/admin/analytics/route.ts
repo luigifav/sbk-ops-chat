@@ -90,6 +90,11 @@ export async function GET(req: NextRequest) {
       responseTimeMs: true,
       createdAt: true,
       theme: true,
+      inputTokens: true,
+      outputTokens: true,
+      cacheReadTokens: true,
+      cacheCreationTokens: true,
+      detectedClient: true,
     },
   })
 
@@ -206,6 +211,51 @@ export async function GET(req: NextRequest) {
   const uniqueOperators = new Set(messages.map((m) => m.operatorName)).size
   const topTheme = themeChartData[0]?.theme ?? '-'
 
+  // Cost data (Sonnet pricing per 1M tokens)
+  const PRICE_INPUT = 3.00
+  const PRICE_OUTPUT = 15.00
+  const PRICE_CACHE_READ = 0.30
+  const PRICE_CACHE_CREATION = 3.75
+
+  let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0
+  for (const m of messages) {
+    totalInput += m.inputTokens ?? 0
+    totalOutput += m.outputTokens ?? 0
+    totalCacheRead += m.cacheReadTokens ?? 0
+    totalCacheCreation += m.cacheCreationTokens ?? 0
+  }
+  const estimatedCostUsd =
+    (totalInput / 1_000_000) * PRICE_INPUT +
+    (totalOutput / 1_000_000) * PRICE_OUTPUT +
+    (totalCacheRead / 1_000_000) * PRICE_CACHE_READ +
+    (totalCacheCreation / 1_000_000) * PRICE_CACHE_CREATION
+  const costWithoutCacheUsd =
+    ((totalInput + totalCacheRead + totalCacheCreation) / 1_000_000) * PRICE_INPUT +
+    (totalOutput / 1_000_000) * PRICE_OUTPUT
+  const cacheSavingsUsd = costWithoutCacheUsd - estimatedCostUsd
+  const totalInputLike = totalInput + totalCacheRead + totalCacheCreation
+  const cacheHitRate = totalInputLike > 0 ? totalCacheRead / totalInputLike : 0
+
+  const costData = {
+    totalInput,
+    totalOutput,
+    totalCacheRead,
+    totalCacheCreation,
+    estimatedCostUsd,
+    cacheSavingsUsd,
+    cacheHitRate,
+  }
+
+  // Client breakdown
+  const clientCount = messages.reduce<Record<string, number>>((acc, msg) => {
+    const c = msg.detectedClient ?? 'Não identificado'
+    acc[c] = (acc[c] ?? 0) + 1
+    return acc
+  }, {})
+  const clientChartData = Object.entries(clientCount)
+    .sort(([, a], [, b]) => b - a)
+    .map(([client, count]) => ({ client, count }))
+
   // Operator list for filter dropdown
   const allOperators = await prisma.message.groupBy({
     by: ['operatorName'],
@@ -219,6 +269,8 @@ export async function GET(req: NextRequest) {
     themeChartData,
     operatorChartData,
     hourlyChartData,
+    costData,
+    clientChartData,
     messages: messages.slice(0, 200),
     operators: allOperators.map((o) => ({
       name: o.operatorName,

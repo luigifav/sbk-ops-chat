@@ -164,18 +164,39 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
-    const { messages: rawMessages, sessionId } = body as {
+    const { messages: rawMessages, sessionId, messageId: rawMessageId } = body as {
       messages: Array<{ role: 'user' | 'assistant'; content: string }>
       sessionId: string
+      messageId?: string
     }
+
+    const messageId =
+      rawMessageId && SESSION_ID_REGEX.test(rawMessageId) ? rawMessageId : undefined
 
     const lastMessage = rawMessages[rawMessages.length - 1]
     const isPetition =
       lastMessage?.role === 'user' && lastMessage?.content?.length > 400
 
+    function truncateHistoryByBudget(
+      msgs: Array<{ role: string; content: string }>,
+      charBudget: number
+    ): Array<{ role: string; content: string }> {
+      const result: typeof msgs = []
+      let usedChars = 0
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const msgChars = msgs[i].content.length
+        if (usedChars + msgChars > charBudget && result.length > 0) break
+        result.unshift(msgs[i])
+        usedChars += msgChars
+      }
+      return result
+    }
+
+    const HISTORY_CHAR_BUDGET = 24_000
+
     const messages = isPetition
       ? [lastMessage]
-      : rawMessages.slice(-10)
+      : truncateHistoryByBudget(rawMessages, HISTORY_CHAR_BUDGET)
 
     const lastUserMessage = ([...messages].reverse().find(m => m.role === 'user')?.content ?? '')
 
@@ -463,6 +484,7 @@ Regras obrigatórias:
           try {
             await prisma.message.create({
               data: {
+                ...(messageId ? { id: messageId } : {}),
                 question,
                 answer: fullResponse,
                 sessionId: validSessionId,
@@ -472,6 +494,7 @@ Regras obrigatórias:
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
+                detectedClient,
               },
             })
           } catch {
