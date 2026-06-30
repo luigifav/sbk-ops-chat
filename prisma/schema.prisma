@@ -23,6 +23,8 @@ model Message {
   cacheCreationTokens  Int?
   detectedClient       String?
   feedback             Int?
+  ragFallback          Boolean  @default(false)
+  ragTopScore          Float?
 }
 
 model Setting {

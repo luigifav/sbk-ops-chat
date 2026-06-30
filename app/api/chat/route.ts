@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
+import { classifyAndSaveTheme } from '@/lib/theme'
 
 export const dynamic = 'force-dynamic'
 
@@ -307,6 +308,8 @@ Regras obrigatórias:
     }
 
     const CONTEXT_CHAR_CAP = 80_000
+    let usedFallback = false
+    let ragTopScore: number | null = null
 
     const queryText = lastUserMessage
 
@@ -340,13 +343,14 @@ Regras obrigatórias:
            ${clientFilter}
            AND (dc.embedding <=> $1::vector) < 0.35
            ORDER BY dc.embedding <=> $1::vector
-           LIMIT 8`,
+           LIMIT 6`,
           vectorLiteral
         )
 
         if (chunks.length > 0) {
           const topScore = Number(chunks[0].score)
-          if (topScore < 0.65) {
+          ragTopScore = topScore
+          if (topScore < 0.55) {
             throw new Error('no_chunks')
           }
           const clientHint = chunks
@@ -373,6 +377,7 @@ Regras obrigatórias:
     } catch (ragError: unknown) {
       const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
       console.warn('[chat] RAG fallback triggered:', ragErrorMsg)
+      usedFallback = true
       try {
         const documents = await prisma.document.findMany({
           where: { active: true },
@@ -482,7 +487,7 @@ Regras obrigatórias:
           // Log interaction after streaming completes
           const responseTimeMs = Date.now() - startTime
           try {
-            await prisma.message.create({
+            const saved = await prisma.message.create({
               data: {
                 ...(messageId ? { id: messageId } : {}),
                 question,
@@ -495,8 +500,13 @@ Regras obrigatórias:
                 cacheReadTokens,
                 cacheCreationTokens,
                 detectedClient,
+                ragFallback: usedFallback,
+                ragTopScore,
               },
+              select: { id: true },
             })
+            // Fire-and-forget theme classification — does not block the response
+            classifyAndSaveTheme(saved.id, question).catch(() => {})
           } catch {
             // Do not fail the request if logging fails
           }

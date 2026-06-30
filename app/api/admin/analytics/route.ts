@@ -1,49 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
-import Anthropic from '@anthropic-ai/sdk'
+import { classifyTheme } from '@/lib/theme'
 
 export const dynamic = 'force-dynamic'
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 
 async function checkAdminAuth(req: NextRequest): Promise<boolean> {
   const adminToken = req.cookies.get('sbk_admin_token')?.value
   if (!adminToken) return false
   return verifyToken(adminToken, process.env.ADMIN_PASSWORD!, process.env.AUTH_SECRET!)
-}
-
-async function classifyTheme(question: string): Promise<string> {
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 20,
-      messages: [
-        {
-          role: 'user',
-          content: `Você é um classificador de perguntas de operadores de Legal Operations.
-
-Temas fixos disponíveis:
-- Prazo e SLA: perguntas sobre prazos, SLAs, datas limite
-- Sistema e acesso: perguntas sobre sistemas, logins, acessos, ferramentas
-- Processo operacional: perguntas sobre como executar processos, procedimentos
-- Dúvida sobre cliente: perguntas específicas sobre Bradesco, Agibank, Eagle, Zurich ou outros clientes
-- Outros: não se encaixa nos anteriores
-
-Se identificar um padrão recorrente diferente dos temas acima, nomeie o tema livremente em até 3 palavras.
-
-Pergunta: "${question.slice(0, 300)}"
-
-Responda APENAS com o nome do tema, sem explicação, sem pontuação.`,
-        },
-      ],
-    })
-    return response.content[0].type === 'text'
-      ? response.content[0].text.trim()
-      : 'Outros'
-  } catch {
-    return 'Outros'
-  }
 }
 
 function escapeCsvField(value: string): string {
@@ -95,11 +60,14 @@ export async function GET(req: NextRequest) {
       cacheReadTokens: true,
       cacheCreationTokens: true,
       detectedClient: true,
+      ragFallback: true,
+      ragTopScore: true,
     },
   })
 
-  // Classify unthemed messages (max 50 per request to control cost)
-  const unthemed = messages.filter((m) => !m.theme).slice(0, 50)
+  // Lazy-classify only truly old messages (no theme) — max 20 per call
+  // New messages are classified at write time via classifyAndSaveTheme
+  const unthemed = messages.filter((m) => !m.theme).slice(0, 20)
   if (unthemed.length > 0) {
     await Promise.all(
       unthemed.map(async (msg) => {
@@ -236,6 +204,52 @@ export async function GET(req: NextRequest) {
   const totalInputLike = totalInput + totalCacheRead + totalCacheCreation
   const cacheHitRate = totalInputLike > 0 ? totalCacheRead / totalInputLike : 0
 
+  // RAG fallback metrics
+  const fallbackMessages = messages.filter((m) => m.ragFallback)
+  const ragMessages = messages.filter((m) => !m.ragFallback && m.ragTopScore != null)
+  const fallbackRate = totalMessages > 0 ? fallbackMessages.length / totalMessages : 0
+  const avgRagScore =
+    ragMessages.length > 0
+      ? ragMessages.reduce((sum, m) => sum + (m.ragTopScore ?? 0), 0) / ragMessages.length
+      : null
+
+  // Estimate cost extra from fallbacks vs. using RAG chunks
+  // Average inputTokens for RAG messages vs fallback messages
+  const avgInputRag =
+    ragMessages.length > 0
+      ? ragMessages.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / ragMessages.length
+      : null
+  const avgInputFallback =
+    fallbackMessages.length > 0
+      ? fallbackMessages.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / fallbackMessages.length
+      : null
+  const fallbackCostUsd =
+    avgInputRag != null && avgInputFallback != null
+      ? ((avgInputFallback - avgInputRag) / 1_000_000) * PRICE_INPUT * fallbackMessages.length
+      : null
+
+  // Daily cost chart
+  const costByDay = messages.reduce<Record<string, number>>((acc, msg) => {
+    const day = msg.createdAt.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+    const msgCost =
+      ((msg.inputTokens ?? 0) / 1_000_000) * PRICE_INPUT +
+      ((msg.outputTokens ?? 0) / 1_000_000) * PRICE_OUTPUT +
+      ((msg.cacheReadTokens ?? 0) / 1_000_000) * PRICE_CACHE_READ +
+      ((msg.cacheCreationTokens ?? 0) / 1_000_000) * PRICE_CACHE_CREATION
+    acc[day] = (acc[day] ?? 0) + msgCost
+    return acc
+  }, {})
+
+  const dailyCostChartData = Object.entries(costByDay)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, cost]) => ({
+      date: new Date(date + 'T12:00:00Z').toLocaleDateString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+      }),
+      custo: parseFloat(cost.toFixed(4)),
+    }))
+
   const costData = {
     totalInput,
     totalOutput,
@@ -244,6 +258,9 @@ export async function GET(req: NextRequest) {
     estimatedCostUsd,
     cacheSavingsUsd,
     cacheHitRate,
+    fallbackRate,
+    avgRagScore,
+    fallbackCostUsd,
   }
 
   // Client breakdown
@@ -271,6 +288,7 @@ export async function GET(req: NextRequest) {
     hourlyChartData,
     costData,
     clientChartData,
+    dailyCostChartData,
     messages: messages.slice(0, 200),
     operators: allOperators.map((o) => ({
       name: o.operatorName,
