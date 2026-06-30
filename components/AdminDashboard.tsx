@@ -79,6 +79,16 @@ interface AnalyticsMessage {
   responseTimeMs: number
 }
 
+interface CostData {
+  totalInput: number
+  totalOutput: number
+  totalCacheRead: number
+  totalCacheCreation: number
+  estimatedCostUsd: number
+  cacheSavingsUsd: number
+  cacheHitRate: number
+}
+
 
 function AnalyticsPanel() {
   type AnalyticsPeriod = 'today' | '7days' | '30days' | 'all'
@@ -100,6 +110,8 @@ function AnalyticsPanel() {
   const [hourlyData, setHourlyData] = useState<{ hora: string; perguntas: number }[]>([])
   const [operators, setOperators] = useState<{ name: string; total: number }[]>([])
   const [messages, setMessages] = useState<AnalyticsMessage[]>([])
+  const [costData, setCostData] = useState<CostData | null>(null)
+  const [clientData, setClientData] = useState<{ client: string; count: number }[]>([])
 
   const fetchAnalytics = useCallback(async () => {
     setLoading(true)
@@ -116,6 +128,8 @@ function AnalyticsPanel() {
         setHourlyData(data.hourlyChartData)
         setMessages(data.messages)
         setOperators(data.operators)
+        if (data.costData) setCostData(data.costData)
+        if (data.clientChartData) setClientData(data.clientChartData)
       }
     } finally {
       setLoading(false)
@@ -296,6 +310,93 @@ function AnalyticsPanel() {
           </BarChart>
         </ResponsiveContainer>
       </div>
+
+      {/* Cost section */}
+      {costData && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {[
+              {
+                label: 'Custo estimado',
+                value: `$${costData.estimatedCostUsd.toFixed(4)}`,
+                sub: 'USD no período',
+              },
+              {
+                label: 'Economia com cache',
+                value: `$${costData.cacheSavingsUsd.toFixed(4)}`,
+                sub: 'USD economizados',
+              },
+              {
+                label: 'Cache hit rate',
+                value: `${(costData.cacheHitRate * 100).toFixed(1)}%`,
+                sub: 'tokens lidos do cache',
+              },
+              {
+                label: 'Total de tokens',
+                value: (costData.totalInput + costData.totalOutput + costData.totalCacheRead + costData.totalCacheCreation).toLocaleString('pt-BR'),
+                sub: 'input + output',
+              },
+            ].map((card) => (
+              <div
+                key={card.label}
+                className="bg-white rounded-xl border-l-[3px] border-l-brand-turquesa p-4"
+              >
+                <p className="text-[11px] text-brand-cinza-chumbo uppercase tracking-[0.08em] mb-1">{card.label}</p>
+                <p className="text-lg font-semibold text-brand-verde-escuro">{card.value}</p>
+                <p className="text-[10px] text-brand-cinza-chumbo mt-0.5">{card.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Token breakdown table */}
+          <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
+            <h3 className="text-sm font-semibold text-brand-verde-escuro mb-3">Breakdown de tokens e custo</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-brand-verde-escuro/10">
+                    <th className="text-left py-2 text-brand-cinza-chumbo font-medium">Tipo</th>
+                    <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Tokens</th>
+                    <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Custo (USD)</th>
+                    <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Preço/1M</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-brand-verde-escuro/[0.04]">
+                  {[
+                    { label: 'Input', tokens: costData.totalInput, price: 3.00 },
+                    { label: 'Output', tokens: costData.totalOutput, price: 15.00 },
+                    { label: 'Cache read', tokens: costData.totalCacheRead, price: 0.30 },
+                    { label: 'Cache creation', tokens: costData.totalCacheCreation, price: 3.75 },
+                  ].map((row) => (
+                    <tr key={row.label}>
+                      <td className="py-2 text-brand-verde-escuro">{row.label}</td>
+                      <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{row.tokens.toLocaleString('pt-BR')}</td>
+                      <td className="py-2 text-right font-mono text-brand-verde-escuro">${((row.tokens / 1_000_000) * row.price).toFixed(4)}</td>
+                      <td className="py-2 text-right text-brand-cinza-chumbo">${row.price.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Client breakdown */}
+          {clientData.length > 0 && (
+            <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
+              <h3 className="text-sm font-semibold text-brand-verde-escuro mb-4">Perguntas por cliente detectado</h3>
+              <ResponsiveContainer width="100%" height={Math.max(clientData.length * 40, 120)}>
+                <BarChart data={clientData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: '#4B4B4B' }} allowDecimals={false} />
+                  <YAxis type="category" dataKey="client" tick={{ fontSize: 11, fill: '#4B4B4B' }} width={130} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#01B2AA" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Recent messages table */}
       <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">

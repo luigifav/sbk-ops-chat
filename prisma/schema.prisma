@@ -21,6 +21,8 @@ model Message {
   outputTokens         Int?
   cacheReadTokens      Int?
   cacheCreationTokens  Int?
+  detectedClient       String?
+  feedback             Int?
 }
 
 model Setting {
