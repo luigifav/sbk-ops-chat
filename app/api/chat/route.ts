@@ -305,8 +305,8 @@ export async function POST(req: NextRequest) {
         { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'],           regex: /\bcwt\b/i },
       ]
 
-      for (const { clientId, categories, regex } of clientInstructions) {
-        if (regex.test(lastUserMessage) || effectiveClient === clientId) {
+      for (const { clientId, categories } of clientInstructions) {
+        if (effectiveClient === clientId) {
           const clientDocs = await prisma.document.findMany({
             where: { active: true, category: { in: categories } },
             orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
