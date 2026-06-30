@@ -87,6 +87,9 @@ interface CostData {
   estimatedCostUsd: number
   cacheSavingsUsd: number
   cacheHitRate: number
+  fallbackRate: number
+  avgRagScore: number | null
+  fallbackCostUsd: number | null
 }
 
 
@@ -112,6 +115,7 @@ function AnalyticsPanel() {
   const [messages, setMessages] = useState<AnalyticsMessage[]>([])
   const [costData, setCostData] = useState<CostData | null>(null)
   const [clientData, setClientData] = useState<{ client: string; count: number }[]>([])
+  const [dailyCostData, setDailyCostData] = useState<{ date: string; custo: number }[]>([])
 
   const fetchAnalytics = useCallback(async () => {
     setLoading(true)
@@ -130,6 +134,7 @@ function AnalyticsPanel() {
         setOperators(data.operators)
         if (data.costData) setCostData(data.costData)
         if (data.clientChartData) setClientData(data.clientChartData)
+        if (data.dailyCostChartData) setDailyCostData(data.dailyCostChartData)
       }
     } finally {
       setLoading(false)
@@ -347,6 +352,62 @@ function AnalyticsPanel() {
               </div>
             ))}
           </div>
+
+          {/* RAG health KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            {[
+              {
+                label: 'Taxa de fallback RAG',
+                value: `${(costData.fallbackRate * 100).toFixed(1)}%`,
+                sub: 'meta: abaixo de 20%',
+                alert: costData.fallbackRate > 0.2,
+              },
+              {
+                label: 'Score RAG médio',
+                value: costData.avgRagScore != null ? costData.avgRagScore.toFixed(2) : '-',
+                sub: 'similaridade média dos chunks',
+                alert: false,
+              },
+              {
+                label: 'Custo extra fallback',
+                value: costData.fallbackCostUsd != null ? `$${costData.fallbackCostUsd.toFixed(4)}` : '-',
+                sub: 'estimado vs. usar RAG',
+                alert: false,
+              },
+            ].map((card) => (
+              <div
+                key={card.label}
+                className={`bg-white rounded-xl border-l-[3px] p-4 ${card.alert ? 'border-l-red-400' : 'border-l-brand-verde-medio'}`}
+              >
+                <p className="text-[11px] text-brand-cinza-chumbo uppercase tracking-[0.08em] mb-1">{card.label}</p>
+                <p className={`text-lg font-semibold ${card.alert ? 'text-red-500' : 'text-brand-verde-escuro'}`}>{card.value}</p>
+                <p className="text-[10px] text-brand-cinza-chumbo mt-0.5">{card.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Daily cost chart */}
+          {dailyCostData.length > 1 && (
+            <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
+              <h3 className="text-sm font-semibold text-brand-verde-escuro mb-4">Custo estimado por dia (USD)</h3>
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={dailyCostData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" />
+                  <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#4B4B4B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#4B4B4B' }} tickFormatter={(v) => `$${v}`} />
+                  <Tooltip formatter={(v) => [`$${Number(v).toFixed(4)}`, 'Custo']} />
+                  <Line
+                    type="monotone"
+                    dataKey="custo"
+                    stroke="#2A7A6F"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
 
           {/* Token breakdown table */}
           <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
