@@ -266,6 +266,44 @@ export async function GET(req: NextRequest) {
     fallbackCostUsd,
   }
 
+  // Cost per message — hoje vs. ontem (independente do período selecionado)
+  const cpmWhere = operatorName ? { operatorName } : {}
+  const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000)
+  const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000)
+
+  const [todayAgg, yesterdayAgg] = await Promise.all([
+    prisma.message.aggregate({
+      where: { ...cpmWhere, createdAt: { gte: todayStart, lt: tomorrowStart } },
+      _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+      _count: { id: true },
+    }),
+    prisma.message.aggregate({
+      where: { ...cpmWhere, createdAt: { gte: yesterdayStart, lt: todayStart } },
+      _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+      _count: { id: true },
+    }),
+  ])
+
+  const costFromAgg = (agg: typeof todayAgg) =>
+    ((agg._sum.inputTokens ?? 0) / 1_000_000) * PRICE_INPUT +
+    ((agg._sum.outputTokens ?? 0) / 1_000_000) * PRICE_OUTPUT +
+    ((agg._sum.cacheReadTokens ?? 0) / 1_000_000) * PRICE_CACHE_READ +
+    ((agg._sum.cacheCreationTokens ?? 0) / 1_000_000) * PRICE_CACHE_CREATION
+
+  const costPerMessageToday = todayAgg._count.id > 0 ? costFromAgg(todayAgg) / todayAgg._count.id : null
+  const costPerMessageYesterday =
+    yesterdayAgg._count.id > 0 ? costFromAgg(yesterdayAgg) / yesterdayAgg._count.id : null
+  const costPerMessageDeltaPercent =
+    costPerMessageToday != null && costPerMessageYesterday != null && costPerMessageYesterday > 0
+      ? ((costPerMessageToday - costPerMessageYesterday) / costPerMessageYesterday) * 100
+      : null
+
+  const costPerMessageData = {
+    today: costPerMessageToday,
+    yesterday: costPerMessageYesterday,
+    deltaPercent: costPerMessageDeltaPercent,
+  }
+
   // Client breakdown
   const clientCount = messages.reduce<Record<string, number>>((acc, msg) => {
     const c = msg.detectedClient ?? 'Não identificado'
@@ -290,6 +328,7 @@ export async function GET(req: NextRequest) {
     operatorChartData,
     hourlyChartData,
     costData,
+    costPerMessageData,
     clientChartData,
     dailyCostChartData,
     messages: messages.slice(0, 200),
