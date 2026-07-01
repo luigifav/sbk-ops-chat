@@ -93,6 +93,12 @@ interface CostData {
   fallbackCostUsd: number | null
 }
 
+interface CostPerMessageData {
+  today: number | null
+  yesterday: number | null
+  deltaPercent: number | null
+}
+
 
 function AnalyticsPanel() {
   type AnalyticsPeriod = 'today' | 'yesterday' | '7days' | '30days' | 'all'
@@ -116,6 +122,7 @@ function AnalyticsPanel() {
   const [operators, setOperators] = useState<{ name: string; total: number }[]>([])
   const [messages, setMessages] = useState<AnalyticsMessage[]>([])
   const [costData, setCostData] = useState<CostData | null>(null)
+  const [costPerMessageData, setCostPerMessageData] = useState<CostPerMessageData | null>(null)
   const [clientData, setClientData] = useState<{ client: string; count: number }[]>([])
   const [dailyCostData, setDailyCostData] = useState<{ date: string; custo: number }[]>([])
 
@@ -135,6 +142,7 @@ function AnalyticsPanel() {
         setMessages(data.messages)
         setOperators(data.operators)
         if (data.costData) setCostData(data.costData)
+        if (data.costPerMessageData) setCostPerMessageData(data.costPerMessageData)
         if (data.clientChartData) setClientData(data.clientChartData)
         if (data.dailyCostChartData) setDailyCostData(data.dailyCostChartData)
       }
@@ -236,6 +244,35 @@ function AnalyticsPanel() {
               <p className="text-lg font-semibold text-brand-verde-escuro truncate">{card.value}</p>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Cost per message */}
+      {costPerMessageData && (
+        <div className="bg-white rounded-xl border-l-[3px] border-l-brand-turquesa p-4 flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-[11px] text-brand-cinza-chumbo uppercase tracking-[0.08em] mb-1">Custo por mensagem</p>
+            <p className="text-lg font-semibold text-brand-verde-escuro">
+              {costPerMessageData.today != null ? `$${costPerMessageData.today.toFixed(4)}` : '-'}
+            </p>
+            <p className="text-[10px] text-brand-cinza-chumbo mt-0.5">USD hoje, por pergunta</p>
+          </div>
+          {costPerMessageData.deltaPercent != null ? (
+            <span
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${
+                costPerMessageData.deltaPercent > 0
+                  ? 'bg-red-50 text-red-500'
+                  : costPerMessageData.deltaPercent < 0
+                    ? 'bg-green-50 text-green-600'
+                    : 'bg-brand-gelo text-brand-cinza-chumbo'
+              }`}
+            >
+              {costPerMessageData.deltaPercent > 0 ? '▲' : costPerMessageData.deltaPercent < 0 ? '▼' : '–'}
+              {Math.abs(costPerMessageData.deltaPercent).toFixed(1)}% vs. ontem
+            </span>
+          ) : (
+            <span className="text-[11px] text-brand-cinza-chumbo">Sem dados de ontem para comparar</span>
+          )}
         </div>
       )}
 
