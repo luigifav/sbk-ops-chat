@@ -8,11 +8,10 @@ import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 
 export const dynamic = 'force-dynamic'
 
-// SECURITY TODO (Production upgrade required):
-// The in-memory rate limiter in lib/ratelimit.ts does not share state across
-// serverless function instances.  Replace with Upstash Redis for accurate
-// per-operator throttling in a multi-instance Vercel deployment.
 // Limit: 60 requests per operator per hour to control Anthropic API costs.
+// Enforced via Redis (lib/ratelimit.ts) when UPSTASH_REDIS_REST_URL/TOKEN are
+// set, so the limit holds across concurrent serverless instances; otherwise
+// falls back to an in-memory counter local to each instance.
 const CHAT_LIMIT = 60
 const CHAT_WINDOW = 60 * 60 * 1_000
 
@@ -172,7 +171,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Rate-limit chat by operator name (falls back to 'Anônimo' for unknown)
-  const rl = checkRateLimit(`chat:${operatorName}`, CHAT_LIMIT, CHAT_WINDOW)
+  const rl = await checkRateLimit(`chat:${operatorName}`, CHAT_LIMIT, CHAT_WINDOW)
   if (!rl.allowed) {
     return NextResponse.json(
       { error: 'Limite de mensagens atingido. Tente novamente mais tarde.' },
@@ -334,6 +333,15 @@ export async function POST(req: NextRequest) {
     } catch (err) {
       console.warn('[chat] Falha ao carregar instruções por cliente:', err)
     }
+
+    // CACHE BOUNDARY: tudo acima deste ponto (prompt fixo + instruções por
+    // cliente) só muda quando um admin altera os documentos ativos ou o
+    // cliente efetivo muda — é reaproveitado como bloco de cache separado.
+    // O que vem a seguir (formato Bradesco condicional + trechos de RAG)
+    // muda a cada pergunta e por isso NÃO deve ser marcado para cache: pagar
+    // a tarifa de escrita de cache sobre conteúdo que nunca será relido do
+    // cache é mais caro do que enviá-lo como input normal.
+    const dynamicContentStart = systemPrompt.length
 
     // Bradesco: substitui o formato genérico de classificação pelo formato específico
     if (effectiveClient === 'bradesco' && isPetition) {
@@ -504,7 +512,15 @@ Regras obrigatórias:
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          const ragContext = systemPrompt.slice(BASE_SYSTEM_PROMPT.length).trim()
+          // Bloco estático por cliente (documentos fixos + instruções do cliente
+          // efetivo): muda raramente, então recebe seu próprio cache_control
+          // para ser reaproveitado entre requisições consecutivas do mesmo cliente.
+          const staticClientText = systemPrompt.slice(BASE_SYSTEM_PROMPT.length, dynamicContentStart).trim()
+          // Bloco dinâmico (formato Bradesco condicional + trechos de RAG/fallback):
+          // muda a cada pergunta, então NÃO recebe cache_control — ver nota acima
+          // do dynamicContentStart sobre o custo de cachear conteúdo que não repete.
+          const dynamicText = systemPrompt.slice(dynamicContentStart).trim()
+
           const systemBlocks: Anthropic.TextBlockParam[] = [
             {
               type: 'text',
@@ -512,20 +528,42 @@ Regras obrigatórias:
               cache_control: { type: 'ephemeral' },
             },
           ]
-          if (ragContext) {
+          if (staticClientText) {
             systemBlocks.push({
               type: 'text',
-              text: ragContext,
+              text: staticClientText,
               cache_control: { type: 'ephemeral' },
             })
           }
+          if (dynamicText) {
+            systemBlocks.push({
+              type: 'text',
+              text: dynamicText,
+            })
+          }
+
+          // Cacheia o histórico de conversa já enviado: marca a penúltima
+          // mensagem (tudo antes da pergunta atual) com cache_control, para que
+          // sessões de múltiplos turnos reaproveitem do cache os turnos
+          // anteriores em vez de pagar como input novo a cada mensagem.
+          const anthropicMessages: Anthropic.MessageParam[] = (messages as Array<{ role: 'user' | 'assistant'; content: string }>).map(
+            (m, i, arr) =>
+              i === arr.length - 2
+                ? {
+                    role: m.role,
+                    content: [
+                      { type: 'text', text: m.content, cache_control: { type: 'ephemeral' } },
+                    ],
+                  }
+                : { role: m.role, content: m.content }
+          )
 
           const stream = await anthropic.messages.create(
             {
               model: 'claude-sonnet-4-6',
               max_tokens: 2048,
               system: systemBlocks,
-              messages: messages as Anthropic.MessageParam[],
+              messages: anthropicMessages,
               stream: true,
             },
             { signal: abortController.signal }
