@@ -413,7 +413,7 @@ Regras obrigatórias:
            JOIN "Document" d ON d.id = dc."documentId"
            WHERE d.active = true
            ${clientFilter}
-           AND (dc.embedding <=> $1::vector) < 0.35
+           AND (dc.embedding <=> $1::vector) < 0.45
            ORDER BY dc.embedding <=> $1::vector
            LIMIT 6`,
           vectorLiteral
