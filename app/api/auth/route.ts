@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
     // --- Auto-cadastro ---------------------------------------------------
     if (isNewAccount) {
       // Rate-limit registrations by IP to prevent invite-code brute-force
-      const rl = checkRateLimit(`register:${ip}`, REGISTER_LIMIT, REGISTER_WINDOW)
+      const rl = await checkRateLimit(`register:${ip}`, REGISTER_LIMIT, REGISTER_WINDOW)
       if (!rl.allowed) {
         return NextResponse.json(
           { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
 
     // --- Login normal ----------------------------------------------------
     // Rate-limit login attempts by IP to prevent brute-force attacks
-    const rl = checkRateLimit(`login:${ip}`, LOGIN_LIMIT, LOGIN_WINDOW)
+    const rl = await checkRateLimit(`login:${ip}`, LOGIN_LIMIT, LOGIN_WINDOW)
     if (!rl.allowed) {
       return NextResponse.json(
         { error: 'Muitas tentativas de login. Tente novamente em alguns instantes.' },

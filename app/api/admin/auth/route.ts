@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
   try {
     // Rate-limit admin login attempts by IP
     const ip = getClientIp(req)
-    const rl = checkRateLimit(`admin-login:${ip}`, ADMIN_LOGIN_LIMIT, ADMIN_LOGIN_WINDOW)
+    const rl = await checkRateLimit(`admin-login:${ip}`, ADMIN_LOGIN_LIMIT, ADMIN_LOGIN_WINDOW)
     if (!rl.allowed) {
       return NextResponse.json(
         { error: 'Muitas tentativas. Tente novamente em alguns instantes.' },

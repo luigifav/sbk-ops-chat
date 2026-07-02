@@ -16,6 +16,7 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@prisma/client": "^5.22.0",
     "@types/bcryptjs": "^2.4.6",
+    "@upstash/redis": "^1.38.0",
     "@vercel/analytics": "^2.0.1",
     "bcryptjs": "^3.0.3",
     "fflate": "^0.8.2",
