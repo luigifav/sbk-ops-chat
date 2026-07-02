@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
 import { classifyAndSaveTheme } from '@/lib/theme'
+import { recordRagOutcome } from '@/lib/ragHealth'
 import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 
 export const dynamic = 'force-dynamic'
@@ -448,7 +449,11 @@ Regras obrigatórias:
       }
     } catch (ragError: unknown) {
       const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
-      console.warn('[chat] RAG fallback triggered:', ragErrorMsg)
+      console.warn('[chat] RAG fallback triggered:', JSON.stringify({
+        reason: ragErrorMsg,
+        effectiveClient,
+        sessionId: validSessionId,
+      }))
       usedFallback = true
       try {
         const documents = await prisma.document.findMany({
@@ -490,6 +495,10 @@ Regras obrigatórias:
         // Proceed with base prompt only
       }
     }
+
+    // Fire-and-forget: alimenta o monitor de saúde do RAG (taxa de fallback
+    // por janela de 15 min) sem bloquear a resposta ao operador.
+    recordRagOutcome(usedFallback).catch(() => {})
 
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')
     const question = lastUserMsg?.content ?? ''
