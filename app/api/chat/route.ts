@@ -279,6 +279,13 @@ export async function POST(req: NextRequest) {
     // into the system prompt, only into user-role messages.
     let systemPrompt = BASE_SYSTEM_PROMPT
 
+    // Categorias cujos documentos já foram injetados no bloco estático do
+    // prompt. O fallback de RAG consulta este Set para não reenviar o mesmo
+    // conteúdo duplicado. Populado apenas quando a injeção de fato ocorre
+    // (as queries abaixo estão em try/catch — se falharem, a categoria não é
+    // marcada e o fallback volta a incluir os docs do cliente).
+    const injectedCategories = new Set<string>()
+
     // Injeta instruções fixas globais — sempre, independente de cliente
     try {
       const fixedDocs = await prisma.document.findMany({
@@ -286,6 +293,7 @@ export async function POST(req: NextRequest) {
         orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
         select: { name: true, content: true },
       })
+      injectedCategories.add('instrucoes-fixas')
       if (fixedDocs.length > 0) {
         const fixedText = fixedDocs
           .map(doc => `### ${doc.name}\n\n${doc.content}`)
@@ -294,16 +302,6 @@ export async function POST(req: NextRequest) {
       }
     } catch (err) {
       console.warn('[chat] Falha ao carregar instruções fixas:', err)
-    }
-
-    // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude a avisar
-    if (clientMismatchNote) {
-      const CLIENT_DISPLAY: Record<string, string> = {
-        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
-      }
-      const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
-      const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
-      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
     }
 
     // Injeta instruções específicas por cliente com base no cliente efetivo
@@ -321,6 +319,7 @@ export async function POST(req: NextRequest) {
             orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
             select: { name: true, content: true },
           })
+          categories.forEach(c => injectedCategories.add(c))
           if (clientDocs.length > 0) {
             const clientText = clientDocs
               .map(doc => `### ${doc.name}\n\n${doc.content}`)
@@ -338,11 +337,24 @@ export async function POST(req: NextRequest) {
     // CACHE BOUNDARY: tudo acima deste ponto (prompt fixo + instruções por
     // cliente) só muda quando um admin altera os documentos ativos ou o
     // cliente efetivo muda — é reaproveitado como bloco de cache separado.
-    // O que vem a seguir (formato Bradesco condicional + trechos de RAG)
-    // muda a cada pergunta e por isso NÃO deve ser marcado para cache: pagar
-    // a tarifa de escrita de cache sobre conteúdo que nunca será relido do
-    // cache é mais caro do que enviá-lo como input normal.
+    // O que vem a seguir (aviso de escopo, formato Bradesco condicional e
+    // trechos de RAG) varia por pergunta e por isso NÃO é marcado para cache.
+    // O dump de documentos do fallback, por outro lado, é determinístico por
+    // escopo de cliente e vira um bloco cacheado PRÓPRIO (fallbackText), fora
+    // do systemPrompt — ver montagem dos systemBlocks abaixo.
     const dynamicContentStart = systemPrompt.length
+
+    // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude
+    // a avisar. Fica APÓS a fronteira de cache: o texto varia por mensagem e,
+    // dentro do prefixo cacheado, invalidaria o cache do bloco estático inteiro.
+    if (clientMismatchNote) {
+      const CLIENT_DISPLAY: Record<string, string> = {
+        bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
+      }
+      const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
+      const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
+      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
+    }
 
     // Bradesco: substitui o formato genérico de classificação pelo formato específico
     if (effectiveClient === 'bradesco' && isPetition) {
@@ -366,7 +378,7 @@ Quando o operador enviar uma petição do Bradesco para classificação, IGNORE 
   [Uma frase explicando por que o gestor secundário se aplica ao caso]
 
 Regras obrigatórias:
-- Use APENAS os códigos de GESTOR PRINCIPAL, COD_TIPO, COD_SUBTIPO e GESTOR SECUNDÁRIO presentes na documentação Bradesco injetada abaixo
+- Use APENAS os códigos de GESTOR PRINCIPAL, COD_TIPO, COD_SUBTIPO e GESTOR SECUNDÁRIO presentes na documentação Bradesco injetada neste contexto
 - AGÊNCIA: extrair o número da agência do Banco Bradesco mencionado na petição; se ausente, escrever "Não identificada nos fatos — preencher com 0"
 - DATA DE INÍCIO DOS DESCONTOS: extrair a data do primeiro vencimento ou primeira prestação; se ausente, escrever "Não identificada na petição"
 - RÉUS ADICIONAIS: listar todos os réus além do Banco Bradesco S.A. com CPF ou CNPJ; se não houver, indicar explicitamente
@@ -380,6 +392,10 @@ Regras obrigatórias:
     const CONTEXT_CHAR_CAP = 80_000
     let usedFallback = false
     let ragTopScore: number | null = null
+    // Dump de documentos do fallback: montado fora do systemPrompt para virar
+    // um bloco de system próprio com cache_control (o conteúdo é determinístico
+    // por escopo de cliente + docs ativos, então o cache é reaproveitado).
+    let fallbackText = ''
 
     const queryText = lastUserMessage
 
@@ -397,6 +413,14 @@ Regras obrigatórias:
       : operatorClients.length > 0
         ? `AND (${operatorClients.map(c => `d.category = '${c}' OR d.category = 'instrucoes-${c}'`).join(' OR ')} OR ${globalCategoryFilter})`
         : ''
+
+    // Escopo do fallback de documentos: espelha o clientFilter do RAG acima.
+    // null = operador sem restrição e sem cliente detectado (todos os docs).
+    const fallbackCategories: string[] | null = effectiveClient
+      ? [effectiveClient, `instrucoes-${effectiveClient}`, ...GLOBAL_CATEGORIES]
+      : operatorClients.length > 0
+        ? [...operatorClients, ...operatorClients.map(c => `instrucoes-${c}`), ...GLOBAL_CATEGORIES]
+        : null
 
     try {
       if (ragQueryText) {
@@ -456,8 +480,17 @@ Regras obrigatórias:
       }))
       usedFallback = true
       try {
+        // Restringe ao escopo do operador/cliente (mesmas categorias que o RAG
+        // pesquisaria) e exclui categorias já injetadas no bloco estático do
+        // prompt — para o agibank/bradesco/cwt os docs do cliente já estão lá,
+        // então reenviá-los aqui seria conteúdo 100% duplicado.
         const documents = await prisma.document.findMany({
-          where: { active: true },
+          where: {
+            active: true,
+            category: fallbackCategories
+              ? { in: fallbackCategories.filter(c => !injectedCategories.has(c)) }
+              : { notIn: [...injectedCategories] },
+          },
           orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
           select: { name: true, content: true, category: true },
         })
@@ -488,7 +521,7 @@ Regras obrigatórias:
             const docsText = selected
               .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
               .join('\n\n---\n\n')
-            systemPrompt += `\n\n## Documentação Operacional\n\n${docsText}`
+            fallbackText = `## Documentação Operacional\n\n${docsText}`
           }
         }
       } catch {
@@ -521,13 +554,19 @@ Regras obrigatórias:
     const readable = new ReadableStream({
       async start(controller) {
         try {
+          // ORÇAMENTO DE CACHE BREAKPOINTS: a API permite no máximo 4 por
+          // requisição, e o pior caso aqui usa exatamente 4 — base(1) +
+          // staticClientText(2) + fallbackText(3) + penúltima mensagem do
+          // histórico(4). NÃO adicione um quinto cache_control sem remover um.
+          //
           // Bloco estático por cliente (documentos fixos + instruções do cliente
           // efetivo): muda raramente, então recebe seu próprio cache_control
           // para ser reaproveitado entre requisições consecutivas do mesmo cliente.
           const staticClientText = systemPrompt.slice(BASE_SYSTEM_PROMPT.length, dynamicContentStart).trim()
-          // Bloco dinâmico (formato Bradesco condicional + trechos de RAG/fallback):
-          // muda a cada pergunta, então NÃO recebe cache_control — ver nota acima
-          // do dynamicContentStart sobre o custo de cachear conteúdo que não repete.
+          // Bloco dinâmico (aviso de escopo + formato Bradesco condicional +
+          // trechos de RAG): muda a cada pergunta, então NÃO recebe cache_control
+          // — ver nota acima do dynamicContentStart sobre o custo de cachear
+          // conteúdo que não repete.
           const dynamicText = systemPrompt.slice(dynamicContentStart).trim()
 
           const systemBlocks: Anthropic.TextBlockParam[] = [
@@ -541,6 +580,17 @@ Regras obrigatórias:
             systemBlocks.push({
               type: 'text',
               text: staticClientText,
+              cache_control: { type: 'ephemeral' },
+            })
+          }
+          // Dump de documentos do fallback: determinístico por (escopo de
+          // cliente, docs ativos), então é cacheado — diferente dos chunks de
+          // RAG, que variam por pergunta. Fica antes do bloco dinâmico para
+          // manter o prefixo cacheável estável.
+          if (fallbackText) {
+            systemBlocks.push({
+              type: 'text',
+              text: fallbackText,
               cache_control: { type: 'ephemeral' },
             })
           }
