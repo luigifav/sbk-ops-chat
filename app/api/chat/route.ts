@@ -23,6 +23,13 @@ const STREAM_TIMEOUT_MS = 60_000
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
 
+// PISO DE CACHE: este bloco é o primeiro breakpoint de cache do system (ver a
+// montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 4.6 é de
+// 1024 tokens; com cerca de 4.800 caracteres em português este prompt fica na
+// faixa de 1,2K a 1,6K tokens, ou seja, com margem estreita. Se ele encolher
+// abaixo do piso, o breakpoint para de cachear silenciosamente, sem erro nem
+// aviso — só cai o cacheReadTokens no dashboard. Encolhendo o prompt base,
+// consolide-o com o bloco seguinte em um único bloco cacheado.
 const BASE_SYSTEM_PROMPT = `
 # IDENTIDADE PERMANENTE
 
@@ -556,9 +563,11 @@ Regras obrigatórias:
       async start(controller) {
         try {
           // ORÇAMENTO DE CACHE BREAKPOINTS: a API permite no máximo 4 por
-          // requisição, e o pior caso aqui usa exatamente 4 — base(1) +
-          // staticClientText(2) + fallbackText(3) + penúltima mensagem do
-          // histórico(4). NÃO adicione um quinto cache_control sem remover um.
+          // requisição. O pior caso aqui usa 3 — base(1) + staticClientText(2)
+          // + fallbackText(3). Sobra 1 de folga; ao usá-la, confirme que o
+          // prefixo até o novo breakpoint é estável entre requisições, senão o
+          // efeito é apenas pagar a sobretaxa de gravação (ver a nota do
+          // histórico, mais abaixo).
           //
           // Bloco estático por cliente (documentos fixos + instruções do cliente
           // efetivo): muda raramente, então recebe seu próprio cache_control
@@ -602,20 +611,19 @@ Regras obrigatórias:
             })
           }
 
-          // Cacheia o histórico de conversa já enviado: marca a penúltima
-          // mensagem (tudo antes da pergunta atual) com cache_control, para que
-          // sessões de múltiplos turnos reaproveitem do cache os turnos
-          // anteriores em vez de pagar como input novo a cada mensagem.
+          // O histórico NÃO é marcado para cache. Cache de prompt é casamento de
+          // prefixo, e o prefixo até o histórico inclui dynamicText (trechos de
+          // RAG), que muda a cada pergunta. Um breakpoint no histórico portanto
+          // nunca produzia leitura de cache: produzia apenas gravação, cobrando
+          // dynamicText mais o histórico como cache_creation a 1,25x em vez de
+          // entrada normal a 1,00x. O conteúdo enviado é idêntico sem ele.
+          //
+          // Para de fato ler o histórico do cache a 0,10x seria preciso mover os
+          // trechos de RAG do system para a última mensagem de usuário, de modo
+          // que o prefixo até o histórico volte a ser estável — ver issue #63,
+          // que depende de validação de qualidade no harness de avaliação.
           const anthropicMessages: Anthropic.MessageParam[] = (messages as Array<{ role: 'user' | 'assistant'; content: string }>).map(
-            (m, i, arr) =>
-              i === arr.length - 2
-                ? {
-                    role: m.role,
-                    content: [
-                      { type: 'text', text: m.content, cache_control: { type: 'ephemeral' } },
-                    ],
-                  }
-                : { role: m.role, content: m.content }
+            (m) => ({ role: m.role, content: m.content })
           )
 
           const stream = await anthropic.messages.create(
