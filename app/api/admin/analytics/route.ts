@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
-import { classifyTheme } from '@/lib/theme'
 import {
   CHAT_MODEL,
   LEGACY_MESSAGE_MODEL,
@@ -79,21 +78,14 @@ export async function GET(req: NextRequest) {
     },
   })
 
-  // Lazy-classify only truly old messages (no theme) — max 20 per call
-  // New messages are classified at write time via classifyAndSaveTheme
-  const unthemed = messages.filter((m) => !m.theme).slice(0, 20)
-  if (unthemed.length > 0) {
-    await Promise.all(
-      unthemed.map(async (msg) => {
-        const theme = await classifyTheme(msg.question)
-        await prisma.message.update({
-          where: { id: msg.id },
-          data: { theme },
-        })
-        msg.theme = theme
-      })
-    )
-  }
+  // Mensagens sem tema aparecem como "Outros" na distribuição abaixo (o
+  // `?? 'Outros'` do themeCount cobre o caso). Não há backfill aqui de
+  // propósito: abrir a tela de analytics disparava até 20 chamadas de modelo em
+  // Promise.all mais 20 UPDATEs, e uma mensagem cujo update de tema falhasse
+  // ficava sem tema para sempre, sendo reclassificada em cada carregamento do
+  // dashboard, indefinidamente. Um caminho de leitura não deve gastar tokens
+  // nem escrever no banco. A classificação acontece na gravação da mensagem,
+  // via classifyAndSaveTheme (lib/theme.ts).
 
   if (exportCsv) {
     const header = 'id,operatorName,theme,question,answer,responseTimeMs,createdAt\n'
