@@ -124,16 +124,20 @@ interface CostPerMessageData {
   deltaPercent: number | null
 }
 
-/** Linhas da tabela de tokens, mapeadas para o campo de token e o preço correspondente. */
+/**
+ * Linhas da tabela de tokens. `totalKey` é o total do período (sempre presente),
+ * `tokenKey` e `priceKey` são usados para somar o custo por modelo.
+ */
 const TOKEN_ROWS: Array<{
   label: string
+  totalKey: 'totalInput' | 'totalOutput' | 'totalCacheRead' | 'totalCacheCreation'
   tokenKey: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'
   priceKey: keyof ModelPrices
 }> = [
-  { label: 'Input', tokenKey: 'inputTokens', priceKey: 'input' },
-  { label: 'Output', tokenKey: 'outputTokens', priceKey: 'output' },
-  { label: 'Cache read', tokenKey: 'cacheReadTokens', priceKey: 'cacheRead' },
-  { label: 'Cache creation', tokenKey: 'cacheCreationTokens', priceKey: 'cacheCreation' },
+  { label: 'Input', totalKey: 'totalInput', tokenKey: 'inputTokens', priceKey: 'input' },
+  { label: 'Output', totalKey: 'totalOutput', tokenKey: 'outputTokens', priceKey: 'output' },
+  { label: 'Cache read', totalKey: 'totalCacheRead', tokenKey: 'cacheReadTokens', priceKey: 'cacheRead' },
+  { label: 'Cache creation', totalKey: 'totalCacheCreation', tokenKey: 'cacheCreationTokens', priceKey: 'cacheCreation' },
 ]
 
 
@@ -518,7 +522,6 @@ function AnalyticsPanel() {
                 <tbody className="divide-y divide-brand-verde-escuro/[0.04]">
                   {TOKEN_ROWS.map((row) => {
                     const models = costData.modelBreakdown ?? []
-                    const tokens = models.reduce((sum, m) => sum + m[row.tokenKey], 0)
                     const cost = models.reduce(
                       (sum, m) => sum + (m[row.tokenKey] / 1_000_000) * m.prices[row.priceKey],
                       0
@@ -527,8 +530,10 @@ function AnalyticsPanel() {
                     return (
                       <tr key={row.label}>
                         <td className="py-2 text-brand-verde-escuro">{row.label}</td>
-                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{tokens.toLocaleString('pt-BR')}</td>
-                        <td className="py-2 text-right font-mono text-brand-verde-escuro">${cost.toFixed(4)}</td>
+                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{costData[row.totalKey].toLocaleString('pt-BR')}</td>
+                        <td className="py-2 text-right font-mono text-brand-verde-escuro">
+                          {models.length > 0 ? `$${cost.toFixed(4)}` : '-'}
+                        </td>
                         <td className="py-2 text-right text-brand-cinza-chumbo">
                           {distinctPrices.length === 1 ? `$${distinctPrices[0].toFixed(2)}` : 'misto'}
                         </td>
