@@ -8,6 +8,7 @@ import {
   costWithoutCacheUsd,
   labelFor,
   pricingFor,
+  splitCacheCreation,
   type TokenUsage,
 } from '@/lib/pricing'
 
@@ -70,6 +71,7 @@ export async function GET(req: NextRequest) {
       outputTokens: true,
       cacheReadTokens: true,
       cacheCreationTokens: true,
+      cacheCreation1hTokens: true,
       detectedClient: true,
       ragFallback: true,
       ragTopScore: true,
@@ -189,6 +191,11 @@ export async function GET(req: NextRequest) {
   // (Message.model), com a tabela de preços em lib/pricing.ts. Mensagens
   // anteriores à coluna `model` caem em LEGACY_MESSAGE_MODEL.
   let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0
+  // Gravações de cache separadas por TTL: a de 1 h custa 2,00x da entrada, a de
+  // 5 min 1,25x (ver lib/pricing.ts). `totalCacheCreation` continua sendo o
+  // total das duas, para que a linha de tokens do dashboard não mude de
+  // significado.
+  let totalCacheCreation1h = 0
 
   interface ModelBucket extends TokenUsage {
     messages: number
@@ -196,6 +203,7 @@ export async function GET(req: NextRequest) {
     outputTokens: number
     cacheReadTokens: number
     cacheCreationTokens: number
+    cacheCreation1hTokens: number
   }
   const buckets = new Map<string, ModelBucket>()
 
@@ -204,6 +212,7 @@ export async function GET(req: NextRequest) {
     totalOutput += m.outputTokens ?? 0
     totalCacheRead += m.cacheReadTokens ?? 0
     totalCacheCreation += m.cacheCreationTokens ?? 0
+    totalCacheCreation1h += splitCacheCreation(m).tokens1h
 
     const key = m.model ?? LEGACY_MESSAGE_MODEL
     let bucket = buckets.get(key)
@@ -214,6 +223,7 @@ export async function GET(req: NextRequest) {
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        cacheCreation1hTokens: 0,
       }
       buckets.set(key, bucket)
     }
@@ -222,6 +232,10 @@ export async function GET(req: NextRequest) {
     bucket.outputTokens += m.outputTokens ?? 0
     bucket.cacheReadTokens += m.cacheReadTokens ?? 0
     bucket.cacheCreationTokens += m.cacheCreationTokens ?? 0
+    // Somado pelo recorte já normalizado da linha, não pela coluna crua: uma
+    // linha inconsistente (recorte de 1 h maior que o total) seria contada aqui
+    // acima do total e faria o balde cobrar mais que o devido.
+    bucket.cacheCreation1hTokens += splitCacheCreation(m).tokens1h
   }
 
   let estimatedCostUsd = 0
@@ -245,6 +259,11 @@ export async function GET(req: NextRequest) {
         outputTokens: bucket.outputTokens,
         cacheReadTokens: bucket.cacheReadTokens,
         cacheCreationTokens: bucket.cacheCreationTokens,
+        // As duas faixas de TTL vão separadas para que a tabela de tokens do
+        // dashboard consiga multiplicar cada uma pelo seu preço e fechar com o
+        // custo do balde acima.
+        cacheCreation5mTokens: bucket.cacheCreationTokens - bucket.cacheCreation1hTokens,
+        cacheCreation1hTokens: bucket.cacheCreation1hTokens,
         costUsd: cost,
         costPerMessageUsd: bucket.messages > 0 ? cost / bucket.messages : null,
         prices: pricingFor(model),
@@ -312,6 +331,8 @@ export async function GET(req: NextRequest) {
     totalOutput,
     totalCacheRead,
     totalCacheCreation,
+    totalCacheCreation5m: totalCacheCreation - totalCacheCreation1h,
+    totalCacheCreation1h,
     estimatedCostUsd,
     cacheSavingsUsd,
     cacheHitRate,
@@ -330,18 +351,34 @@ export async function GET(req: NextRequest) {
   const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000)
 
   // Agrupado por modelo para que o custo por mensagem seja precificado com o
-  // preço de quem atendeu, e não com um preço único assumido para o período.
+  // preço de quem atendeu, e não com um preço único assumido para o período. A
+  // soma de cacheCreation1hTokens entra junto porque este card é justamente o
+  // que compara o custo médio antes e depois do TTL de 1 h (issue #64): sem ela,
+  // toda gravação nova seria cobrada a 1,25x em vez de 2,00x e o card mostraria
+  // uma economia que não existe.
   const [todayGroups, yesterdayGroups] = await Promise.all([
     prisma.message.groupBy({
       by: ['model'],
       where: { ...cpmWhere, createdAt: { gte: todayStart, lt: tomorrowStart } },
-      _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+      _sum: {
+        inputTokens: true,
+        outputTokens: true,
+        cacheReadTokens: true,
+        cacheCreationTokens: true,
+        cacheCreation1hTokens: true,
+      },
       _count: { id: true },
     }),
     prisma.message.groupBy({
       by: ['model'],
       where: { ...cpmWhere, createdAt: { gte: yesterdayStart, lt: todayStart } },
-      _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+      _sum: {
+        inputTokens: true,
+        outputTokens: true,
+        cacheReadTokens: true,
+        cacheCreationTokens: true,
+        cacheCreation1hTokens: true,
+      },
       _count: { id: true },
     }),
   ])
@@ -356,6 +393,7 @@ export async function GET(req: NextRequest) {
           outputTokens: g._sum.outputTokens,
           cacheReadTokens: g._sum.cacheReadTokens,
           cacheCreationTokens: g._sum.cacheCreationTokens,
+          cacheCreation1hTokens: g._sum.cacheCreation1hTokens,
         },
         g.model
       )

@@ -21,6 +21,12 @@ model Message {
   outputTokens         Int?
   cacheReadTokens      Int?
   cacheCreationTokens  Int?
+  // Parcela de cacheCreationTokens gravada com TTL de 1 h, que custa 2,00x da
+  // entrada contra 1,25x dos 5 min padrão. cacheCreationTokens continua sendo o
+  // total: esta coluna é o recorte de 1 h dentro dele, e a parcela de 5 min sai
+  // por subtração (ver splitCacheCreation em lib/pricing.ts). Nulo nas linhas
+  // gravadas antes do TTL de 1 h existir, que são integralmente de 5 min.
+  cacheCreation1hTokens Int?
   detectedClient       String?
   feedback             Int?
   ragFallback          Boolean  @default(false)

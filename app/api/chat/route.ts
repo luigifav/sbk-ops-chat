@@ -47,6 +47,14 @@ const TRUNCATION_NOTICE =
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
 
+// cache_control dos blocos estáveis do system, declarado uma única vez para que
+// os três breakpoints não divirjam de TTL com o tempo. O motivo de 1 h está na
+// nota de ORÇAMENTO DE CACHE BREAKPOINTS, na montagem dos systemBlocks.
+const STABLE_CACHE_CONTROL: Anthropic.CacheControlEphemeral = {
+  type: 'ephemeral',
+  ttl: '1h',
+}
+
 // PISO DE CACHE: este bloco é o primeiro breakpoint de cache do system (ver a
 // montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 4.6 é de
 // 1024 tokens; com cerca de 4.800 caracteres em português este prompt fica na
@@ -603,6 +611,10 @@ Regras obrigatórias:
     let outputTokens: number | null = null
     let cacheReadTokens: number | null = null
     let cacheCreationTokens: number | null = null
+    // Recorte de 1 h dentro de cacheCreationTokens. Gravado porque as duas
+    // faixas de TTL têm preços diferentes (2,00x contra 1,25x da entrada) e o
+    // dashboard precisa saber qual aplicar a cada linha — ver lib/pricing.ts.
+    let cacheCreation1hTokens: number | null = null
     // stop_reason da API ('end_turn', 'max_tokens', ...) ou, quando a requisição
     // não chega ao fim, o marcador local 'timeout' / 'error' gravado no catch.
     let stopReason: string | null = null
@@ -627,6 +639,19 @@ Regras obrigatórias:
           // efeito é apenas pagar a sobretaxa de gravação (ver a nota do
           // histórico, mais abaixo).
           //
+          // TTL DE 1 h (issue #64): os três blocos abaixo usam `ttl: '1h'` em
+          // vez dos 5 min padrão. O perfil de uso é de ferramenta interna —
+          // poucos operadores, perguntas pontuais ao longo do dia — e um
+          // intervalo maior que 5 min entre mensagens é o caso comum, não a
+          // exceção, tanto que o cliente reseta a sessão por inatividade nessa
+          // mesma ordem de grandeza. Com TTL de 5 min o prefixo estático era
+          // regravado a cada pergunta: a 1,25x na gravação em vez de 0,10x na
+          // leitura. A gravação de 1 h custa 2,00x, o que move o ponto de
+          // equilíbrio de 2 para 3 leituras dentro da janela — em uma hora de
+          // dia útil isso é folgado. O TTL só vale para blocos estáveis por
+          // definição; o bloco dinâmico abaixo (trechos de RAG) segue sem
+          // cache_control nenhum.
+          //
           // Bloco estático por cliente (documentos fixos + instruções do cliente
           // efetivo): muda raramente, então recebe seu próprio cache_control
           // para ser reaproveitado entre requisições consecutivas do mesmo cliente.
@@ -641,14 +666,14 @@ Regras obrigatórias:
             {
               type: 'text',
               text: BASE_SYSTEM_PROMPT,
-              cache_control: { type: 'ephemeral' },
+              cache_control: STABLE_CACHE_CONTROL,
             },
           ]
           if (staticClientText) {
             systemBlocks.push({
               type: 'text',
               text: staticClientText,
-              cache_control: { type: 'ephemeral' },
+              cache_control: STABLE_CACHE_CONTROL,
             })
           }
           // Dump de documentos do fallback: determinístico por (escopo de
@@ -659,7 +684,7 @@ Regras obrigatórias:
             systemBlocks.push({
               type: 'text',
               text: fallbackText,
-              cache_control: { type: 'ephemeral' },
+              cache_control: STABLE_CACHE_CONTROL,
             })
           }
           if (dynamicText) {
@@ -703,6 +728,12 @@ Regras obrigatórias:
               inputTokens = event.message.usage.input_tokens
               cacheReadTokens = event.message.usage.cache_read_input_tokens ?? null
               cacheCreationTokens = event.message.usage.cache_creation_input_tokens ?? null
+              // `cache_creation` é a quebra por TTL do mesmo total acima. Vem
+              // nulo quando a requisição não gravou cache; nesse caso o recorte
+              // de 1 h fica nulo também e a linha é precificada como 5 min, que
+              // é o comportamento correto para zero tokens gravados.
+              cacheCreation1hTokens =
+                event.message.usage.cache_creation?.ephemeral_1h_input_tokens ?? null
             } else if (event.type === 'message_delta') {
               outputTokens = event.usage.output_tokens
               stopReason = event.delta.stop_reason ?? stopReason
@@ -747,6 +778,7 @@ Regras obrigatórias:
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
+                cacheCreation1hTokens,
                 detectedClient: analyticsClient,
                 ragFallback: usedFallback,
                 ragTopScore,
@@ -793,6 +825,7 @@ Regras obrigatórias:
                   outputTokens,
                   cacheReadTokens,
                   cacheCreationTokens,
+                  cacheCreation1hTokens,
                   detectedClient: analyticsClient,
                   ragFallback: usedFallback,
                   ragTopScore,
