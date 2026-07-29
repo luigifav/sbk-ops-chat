@@ -11,6 +11,8 @@
 
 A aplicação possui uma arquitetura sólida para uma plataforma interna (App Router, Prisma ORM, bcrypt para senhas de operadores, cookies httpOnly). Foram identificados **17 itens de segurança** distribuídos em nove categorias. Todos os itens foram endereçados nesta auditoria: 13 corrigidos no código e 4 documentados como riscos residuais aceitos com TODOs explícitos.
 
+**Atualização 2026-07-29 (issue #66):** O risco residual **R2** foi mitigado. O rate limit de `/api/chat` deixou de ser chaveado em cookie não-httpOnly e passou a usar `sbk_operator_id`, com teto diário adicional. Ver a seção R2 na Parte B para o estado atual e o resíduo remanescente.
+
 ---
 
 ## Parte A — O que foi corrigido
@@ -201,18 +203,22 @@ Documentação: https://github.com/upstash/ratelimit-js
 
 ---
 
-### R2. Log-Attribution Spoofing via `sbk_operator_name` (BAIXO)
+### R2. Log-Attribution Spoofing via `sbk_operator_name` (BAIXO — mitigado)
 
-**Risco:** O cookie `sbk_operator_name` não é httpOnly. Um operador autenticado pode modificar seu valor no navegador e ter mensagens registradas sob o nome de outro operador.
+**Status:** Mitigado no chat. O risco residual ficou restrito a sessões antigas.
 
-**Impacto:** Apenas integridade dos logs de auditoria. Não há escalação de privilégio — a autenticação é feita exclusivamente pelo `sbk_auth_token` (httpOnly).
+**Risco original:** O cookie `sbk_operator_name` não é httpOnly. Um operador autenticado podia modificar seu valor no navegador e ter mensagens registradas sob o nome de outro operador. Pior: a mesma variável era usada como chave do rate limit de `/api/chat`, então alterar o cookie zerava o contador que existe para conter o custo da API Anthropic, sem ferramenta especial e sem sair do navegador (issue #66).
 
-**Causa raiz:** O design atual usa um único token compartilhado (`HMAC(ACCESS_PASSWORD, AUTH_SECRET)`) para todos os operadores. Sem um identificador de operador no token, não é possível validar o nome contra o banco no servidor.
+**Correção aplicada (`api/chat/route.ts`):**
+- O rate limit passou a ser chaveado no cookie httpOnly `sbk_operator_id` (`chat:op:<id>`), com fallback por IP (`chat:ip:<ip>`) para sessões emitidas antes desse cookie existir. A leitura do cookie foi movida para antes da checagem de limite.
+- `Message.operatorName` passou a ser resolvido do banco (`prisma.operator.findUnique`, campo `name` incluído no `select` que já era executado para as permissões de cliente). O cookie só é usado como último recurso quando não há `sbk_operator_id`.
+- Foi adicionado um segundo limite com janela de 24 h sobre a mesma chave (`CHAT_DAILY_LIMIT`, padrão 250), porque o limite de 60/hora sozinho permitia 1.440 mensagens por dia por operador.
 
-**Solução recomendada:**
-Emitir tokens per-operador: `HMAC(operatorId + ":" + hashedPassword, AUTH_SECRET)`, armazenar o `operatorId` em sessão e resolver o nome no servidor.
+**Risco residual:** Sessões emitidas antes do cookie `sbk_operator_id` continuam usando o nome do cookie para log e o IP para o rate limit. O resíduo desaparece na expiração natural dessas sessões (`maxAge` de 8 h).
 
-**SECURITY TODO:** Marcado em `api/auth/route.ts` e `api/chat/route.ts`.
+**Melhoria futura:** Emitir tokens per-operador (`HMAC(operatorId + ":" + hashedPassword, AUTH_SECRET)`) para eliminar também o caminho de fallback.
+
+**Nota:** Um teto global de gasto diário (contador de custo estimado em Redis, com alerta por webhook no padrão de `lib/ragHealth.ts`) segue pendente — ver issue #66, item 4.
 
 ---
 

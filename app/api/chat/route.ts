@@ -17,6 +17,17 @@ export const dynamic = 'force-dynamic'
 const CHAT_LIMIT = 60
 const CHAT_WINDOW = 60 * 60 * 1_000
 
+// Segundo teto, em janela de 24 h, sobre a mesma chave. O limite horário sozinho
+// permite 1.440 mensagens por dia por operador. Configurável por
+// CHAT_DAILY_LIMIT; valores inválidos ou ausentes caem no padrão.
+const CHAT_DAILY_LIMIT_DEFAULT = 250
+const parsedDailyLimit = Number.parseInt(process.env.CHAT_DAILY_LIMIT ?? '', 10)
+const CHAT_DAILY_LIMIT =
+  Number.isFinite(parsedDailyLimit) && parsedDailyLimit > 0
+    ? parsedDailyLimit
+    : CHAT_DAILY_LIMIT_DEFAULT
+const CHAT_DAILY_WINDOW = 24 * 60 * 60 * 1_000
+
 // Streaming timeout: abort Claude stream if no response after 60 seconds.
 const STREAM_TIMEOUT_MS = 60_000
 
@@ -149,19 +160,6 @@ const anthropic = new Anthropic({
 })
 
 export async function POST(req: NextRequest) {
-  // SECURITY NOTE — operator-name attribution:
-  // sbk_operator_name is a non-httpOnly cookie readable by client-side JS (by
-  // design, so the Chat UI can display the name).  A malicious — or curious —
-  // authenticated operator could set this cookie to any value, causing their
-  // messages to be logged under a different name.  This is an accepted risk for
-  // a logging/display-only field.  Authentication is enforced exclusively by
-  // sbk_auth_token (httpOnly).
-  //
-  // SECURITY TODO: For higher log integrity, consider embedding the operatorId
-  // in the auth token so the server can resolve the true operator name from the
-  // database without trusting the non-httpOnly cookie.
-  const operatorName = req.cookies.get('sbk_operator_name')?.value ?? 'Anônimo'
-
   // Verify operator auth
   const authToken = req.cookies.get('sbk_auth_token')?.value
   if (!authToken) {
@@ -176,30 +174,71 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  // Resolve per-operator client permissions using the httpOnly sbk_operator_id cookie.
-  // Falls back to empty (no restriction) if the cookie is absent or the operator is not found.
+  // Resolve o operador pelo cookie httpOnly sbk_operator_id. A leitura acontece
+  // ANTES do rate limit de propósito: a chave do limite precisa vir de um valor
+  // que o cliente não consegue alterar (ver a nota de segurança abaixo).
+  //
+  // SECURITY NOTE — integridade da chave de custo e da atribuição de log:
+  // sbk_operator_name é um cookie não-httpOnly, legível e gravável por
+  // JavaScript no cliente por design (o componente Chat exibe o nome). Por isso
+  // ele NÃO é usado como chave do rate limit nem, quando há sbk_operator_id,
+  // como origem de Message.operatorName: um operador autenticado que alterasse
+  // document.cookie receberia um contador zerado e reiniciaria à vontade o
+  // limite que existe para conter o custo da API. O nome é resolvido do banco
+  // quando há sbk_operator_id, e o cookie só é usado como último recurso, em
+  // sessões antigas emitidas antes do cookie de id existir. A autenticação
+  // continua sendo feita exclusivamente por sbk_auth_token (httpOnly).
   let operatorClients: string[] = []
+  let resolvedOperatorName: string | null = null
   const operatorId = req.cookies.get('sbk_operator_id')?.value
   if (operatorId) {
     try {
       const op = await prisma.operator.findUnique({
         where: { id: operatorId },
-        select: { clients: true },
+        select: { clients: true, name: true },
       })
       operatorClients = (op?.clients ?? []).filter((c): c is string => CLIENT_IDS.includes(c as never))
+      resolvedOperatorName = op?.name ?? null
     } catch {
       // Non-fatal: proceed without client scoping
     }
   }
 
-  // Rate-limit chat by operator name (falls back to 'Anônimo' for unknown)
-  const rl = await checkRateLimit(`chat:${operatorName}`, CHAT_LIMIT, CHAT_WINDOW)
+  const operatorName =
+    resolvedOperatorName ?? req.cookies.get('sbk_operator_name')?.value ?? 'Anônimo'
+
+  // Chave do rate limit: o id httpOnly quando existe, IP como fallback para
+  // sessões emitidas antes do cookie de id. Nunca o nome vindo do cookie.
+  // O fallback por IP é compartilhado entre operadores atrás do mesmo NAT, o
+  // que é conservador de propósito: ele só é alcançado por sessões antigas, que
+  // expiram em no máximo 8 h (maxAge do cookie de autenticação).
+  const rateLimitKey = operatorId
+    ? `chat:op:${operatorId}`
+    : `chat:ip:${req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+        req.headers.get('x-real-ip') ??
+        'unknown'}`
+
+  const rl = await checkRateLimit(rateLimitKey, CHAT_LIMIT, CHAT_WINDOW)
   if (!rl.allowed) {
     return NextResponse.json(
       { error: 'Limite de mensagens atingido. Tente novamente mais tarde.' },
       {
         status: 429,
         headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1_000)) },
+      }
+    )
+  }
+
+  // Teto diário: o limite horário sozinho permite 1.440 mensagens por dia por
+  // operador, ordens de magnitude acima do uso real, e não protege contra um
+  // script deixado rodando por engano.
+  const daily = await checkRateLimit(`${rateLimitKey}:daily`, CHAT_DAILY_LIMIT, CHAT_DAILY_WINDOW)
+  if (!daily.allowed) {
+    return NextResponse.json(
+      { error: 'Limite diário de mensagens atingido. Fale com o suporte SBK se precisar de mais.' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil((daily.resetAt - Date.now()) / 1_000)) },
       }
     )
   }
