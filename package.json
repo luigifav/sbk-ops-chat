@@ -11,7 +11,9 @@
     "lint": "next lint",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
-    "measure": "tsx scripts/measure.ts"
+    "measure": "tsx scripts/measure.ts",
+    "eval": "tsx evals/run.ts",
+    "eval:extract": "tsx evals/extract.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
