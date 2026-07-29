@@ -6,6 +6,7 @@ import { checkRateLimit } from '@/lib/ratelimit'
 import { classifyAndSaveTheme } from '@/lib/theme'
 import { recordRagOutcome } from '@/lib/ragHealth'
 import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
+import { CHAT_MODEL } from '@/lib/pricing'
 
 export const dynamic = 'force-dynamic'
 
@@ -619,7 +620,10 @@ Regras obrigatórias:
 
           const stream = await anthropic.messages.create(
             {
-              model: 'claude-sonnet-4-6',
+              // O id do modelo vem de lib/pricing.ts para que trocá-lo obrigue
+              // a cadastrar o preço correspondente — o dashboard precifica cada
+              // mensagem pelo modelo gravado em Message.model.
+              model: CHAT_MODEL,
               max_tokens: 2048,
               system: systemBlocks,
               messages: anthropicMessages,
@@ -663,6 +667,7 @@ Regras obrigatórias:
                 detectedClient: analyticsClient,
                 ragFallback: usedFallback,
                 ragTopScore,
+                model: CHAT_MODEL,
               },
               select: { id: true },
             })

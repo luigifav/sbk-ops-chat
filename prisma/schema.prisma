@@ -25,6 +25,10 @@ model Message {
   feedback             Int?
   ragFallback          Boolean  @default(false)
   ragTopScore          Float?
+  // Modelo que atendeu a mensagem. Nulo nas linhas gravadas antes desta
+  // coluna existir — o dashboard as precifica com LEGACY_MESSAGE_MODEL
+  // (ver lib/pricing.ts).
+  model                String?
 }
 
 model Setting {
