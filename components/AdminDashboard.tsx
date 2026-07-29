@@ -80,6 +80,26 @@ interface AnalyticsMessage {
   responseTimeMs: number
 }
 
+interface ModelPrices {
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+}
+
+interface ModelBreakdownEntry {
+  model: string
+  label: string
+  messages: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  costUsd: number
+  costPerMessageUsd: number | null
+  prices: ModelPrices
+}
+
 interface CostData {
   totalInput: number
   totalOutput: number
@@ -91,6 +111,11 @@ interface CostData {
   fallbackRate: number
   avgRagScore: number | null
   fallbackCostUsd: number | null
+  // Opcionais para tolerar uma resposta antiga em cache do navegador.
+  modelBreakdown?: ModelBreakdownEntry[]
+  truncatedCount?: number
+  truncationRate?: number
+  failedCount?: number
 }
 
 interface CostPerMessageData {
@@ -98,6 +123,22 @@ interface CostPerMessageData {
   yesterday: number | null
   deltaPercent: number | null
 }
+
+/**
+ * Linhas da tabela de tokens. `totalKey` é o total do período (sempre presente),
+ * `tokenKey` e `priceKey` são usados para somar o custo por modelo.
+ */
+const TOKEN_ROWS: Array<{
+  label: string
+  totalKey: 'totalInput' | 'totalOutput' | 'totalCacheRead' | 'totalCacheCreation'
+  tokenKey: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'
+  priceKey: keyof ModelPrices
+}> = [
+  { label: 'Input', totalKey: 'totalInput', tokenKey: 'inputTokens', priceKey: 'input' },
+  { label: 'Output', totalKey: 'totalOutput', tokenKey: 'outputTokens', priceKey: 'output' },
+  { label: 'Cache read', totalKey: 'totalCacheRead', tokenKey: 'cacheReadTokens', priceKey: 'cacheRead' },
+  { label: 'Cache creation', totalKey: 'totalCacheCreation', tokenKey: 'cacheCreationTokens', priceKey: 'cacheCreation' },
+]
 
 
 function AnalyticsPanel() {
@@ -392,7 +433,7 @@ function AnalyticsPanel() {
             ))}
           </div>
 
-          {/* RAG health KPIs */}
+          {/* RAG health e qualidade da resposta */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             {[
               {
@@ -412,6 +453,21 @@ function AnalyticsPanel() {
                 value: costData.fallbackCostUsd != null ? `$${costData.fallbackCostUsd.toFixed(4)}` : '-',
                 sub: 'estimado vs. usar RAG',
                 alert: false,
+              },
+              {
+                label: 'Respostas truncadas',
+                value:
+                  costData.truncationRate != null
+                    ? `${(costData.truncationRate * 100).toFixed(1)}%`
+                    : '-',
+                sub: `${costData.truncatedCount ?? 0} cortadas em max_tokens`,
+                alert: (costData.truncationRate ?? 0) > 0.02,
+              },
+              {
+                label: 'Requisições interrompidas',
+                value: (costData.failedCount ?? 0).toLocaleString('pt-BR'),
+                sub: 'timeout do stream ou erro da API',
+                alert: (costData.failedCount ?? 0) > 0,
               },
             ].map((card) => (
               <div
@@ -448,7 +504,9 @@ function AnalyticsPanel() {
             </div>
           )}
 
-          {/* Token breakdown table */}
+          {/* Token breakdown table — preços vêm da tabela por modelo do backend
+              (lib/pricing.ts). Com mais de um modelo no período, o custo de cada
+              tipo é a soma por modelo e a coluna de preço mostra "misto". */}
           <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
             <h3 className="text-sm font-semibold text-brand-verde-escuro mb-3">Breakdown de tokens e custo</h3>
             <div className="overflow-x-auto">
@@ -462,23 +520,65 @@ function AnalyticsPanel() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-brand-verde-escuro/[0.04]">
-                  {[
-                    { label: 'Input', tokens: costData.totalInput, price: 3.00 },
-                    { label: 'Output', tokens: costData.totalOutput, price: 15.00 },
-                    { label: 'Cache read', tokens: costData.totalCacheRead, price: 0.30 },
-                    { label: 'Cache creation', tokens: costData.totalCacheCreation, price: 3.75 },
-                  ].map((row) => (
-                    <tr key={row.label}>
-                      <td className="py-2 text-brand-verde-escuro">{row.label}</td>
-                      <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{row.tokens.toLocaleString('pt-BR')}</td>
-                      <td className="py-2 text-right font-mono text-brand-verde-escuro">${((row.tokens / 1_000_000) * row.price).toFixed(4)}</td>
-                      <td className="py-2 text-right text-brand-cinza-chumbo">${row.price.toFixed(2)}</td>
-                    </tr>
-                  ))}
+                  {TOKEN_ROWS.map((row) => {
+                    const models = costData.modelBreakdown ?? []
+                    const cost = models.reduce(
+                      (sum, m) => sum + (m[row.tokenKey] / 1_000_000) * m.prices[row.priceKey],
+                      0
+                    )
+                    const distinctPrices = Array.from(new Set(models.map((m) => m.prices[row.priceKey])))
+                    return (
+                      <tr key={row.label}>
+                        <td className="py-2 text-brand-verde-escuro">{row.label}</td>
+                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{costData[row.totalKey].toLocaleString('pt-BR')}</td>
+                        <td className="py-2 text-right font-mono text-brand-verde-escuro">
+                          {models.length > 0 ? `$${cost.toFixed(4)}` : '-'}
+                        </td>
+                        <td className="py-2 text-right text-brand-cinza-chumbo">
+                          {distinctPrices.length === 1 ? `$${distinctPrices[0].toFixed(2)}` : 'misto'}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
+
+          {/* Custo por modelo */}
+          {(costData.modelBreakdown?.length ?? 0) > 0 && (
+            <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
+              <h3 className="text-sm font-semibold text-brand-verde-escuro mb-3">Custo por modelo</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-brand-verde-escuro/10">
+                      <th className="text-left py-2 text-brand-cinza-chumbo font-medium">Modelo</th>
+                      <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Mensagens</th>
+                      <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Tokens</th>
+                      <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Custo (USD)</th>
+                      <th className="text-right py-2 text-brand-cinza-chumbo font-medium">Por mensagem</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-brand-verde-escuro/[0.04]">
+                    {costData.modelBreakdown?.map((m) => (
+                      <tr key={m.model}>
+                        <td className="py-2 text-brand-verde-escuro">{m.label}</td>
+                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{m.messages.toLocaleString('pt-BR')}</td>
+                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">
+                          {(m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheCreationTokens).toLocaleString('pt-BR')}
+                        </td>
+                        <td className="py-2 text-right font-mono text-brand-verde-escuro">${m.costUsd.toFixed(4)}</td>
+                        <td className="py-2 text-right font-mono text-brand-verde-escuro">
+                          {m.costPerMessageUsd != null ? `$${m.costPerMessageUsd.toFixed(4)}` : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Client breakdown */}
           {clientData.length > 0 && (

@@ -164,17 +164,15 @@ export async function POST(req: NextRequest) {
     // the Chat component can read it via document.cookie to display the
     // operator's name in the UI (see components/Chat.tsx).
     //
-    // Accepted risk: a malicious script (e.g., via XSS) could read or spoof
-    // this value.  Because this cookie is used ONLY for logging/display — the
-    // actual authentication is performed by sbk_auth_token (httpOnly) — the
-    // impact is limited to log-attribution spoofing (an authenticated operator
-    // misrepresenting their name in chat logs).  No privilege escalation is
-    // possible via this cookie alone.
-    //
-    // SECURITY TODO: For higher log integrity, replace per-operator name
-    // attribution with a server-side lookup: store the operatorId in the
-    // auth token payload (e.g. HMAC(operatorId:accessPassword, secret)) so
-    // the server can resolve the real name without trusting the cookie.
+    // This cookie is display-only on the server side.  /api/chat resolves the
+    // operator name from the database via the httpOnly sbk_operator_id cookie
+    // and keys its rate limit on that id, so spoofing this value no longer
+    // affects Message.operatorName nor resets the cost-control counter.  The
+    // cookie is still read as a last-resort fallback for sessions issued before
+    // sbk_operator_id existed; in that (shrinking) case, log-attribution
+    // spoofing remains possible.  Authentication is performed exclusively by
+    // sbk_auth_token (httpOnly), so no privilege escalation is possible via
+    // this cookie alone.
     response.cookies.set('sbk_operator_name', operator.name, {
       httpOnly: false,
       sameSite: 'lax',

@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
-import { classifyTheme } from '@/lib/theme'
+import {
+  CHAT_MODEL,
+  LEGACY_MESSAGE_MODEL,
+  costUsd,
+  costWithoutCacheUsd,
+  labelFor,
+  pricingFor,
+  type TokenUsage,
+} from '@/lib/pricing'
 
 export const dynamic = 'force-dynamic'
 
@@ -65,24 +73,19 @@ export async function GET(req: NextRequest) {
       detectedClient: true,
       ragFallback: true,
       ragTopScore: true,
+      model: true,
+      stopReason: true,
     },
   })
 
-  // Lazy-classify only truly old messages (no theme) — max 20 per call
-  // New messages are classified at write time via classifyAndSaveTheme
-  const unthemed = messages.filter((m) => !m.theme).slice(0, 20)
-  if (unthemed.length > 0) {
-    await Promise.all(
-      unthemed.map(async (msg) => {
-        const theme = await classifyTheme(msg.question)
-        await prisma.message.update({
-          where: { id: msg.id },
-          data: { theme },
-        })
-        msg.theme = theme
-      })
-    )
-  }
+  // Mensagens sem tema aparecem como "Outros" na distribuição abaixo (o
+  // `?? 'Outros'` do themeCount cobre o caso). Não há backfill aqui de
+  // propósito: abrir a tela de analytics disparava até 20 chamadas de modelo em
+  // Promise.all mais 20 UPDATEs, e uma mensagem cujo update de tema falhasse
+  // ficava sem tema para sempre, sendo reclassificada em cada carregamento do
+  // dashboard, indefinidamente. Um caminho de leitura não deve gastar tokens
+  // nem escrever no banco. A classificação acontece na gravação da mensagem,
+  // via classifyAndSaveTheme (lib/theme.ts).
 
   if (exportCsv) {
     const header = 'id,operatorName,theme,question,answer,responseTimeMs,createdAt\n'
@@ -182,30 +185,86 @@ export async function GET(req: NextRequest) {
   const uniqueOperators = new Set(messages.map((m) => m.operatorName)).size
   const topTheme = themeChartData[0]?.theme ?? '-'
 
-  // Cost data (Sonnet pricing per 1M tokens)
-  const PRICE_INPUT = 3.00
-  const PRICE_OUTPUT = 15.00
-  const PRICE_CACHE_READ = 0.30
-  const PRICE_CACHE_CREATION = 3.75
-
+  // Cost data — cada mensagem é precificada pelo modelo que a atendeu
+  // (Message.model), com a tabela de preços em lib/pricing.ts. Mensagens
+  // anteriores à coluna `model` caem em LEGACY_MESSAGE_MODEL.
   let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0
+
+  interface ModelBucket extends TokenUsage {
+    messages: number
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheCreationTokens: number
+  }
+  const buckets = new Map<string, ModelBucket>()
+
   for (const m of messages) {
     totalInput += m.inputTokens ?? 0
     totalOutput += m.outputTokens ?? 0
     totalCacheRead += m.cacheReadTokens ?? 0
     totalCacheCreation += m.cacheCreationTokens ?? 0
+
+    const key = m.model ?? LEGACY_MESSAGE_MODEL
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = {
+        messages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      }
+      buckets.set(key, bucket)
+    }
+    bucket.messages += 1
+    bucket.inputTokens += m.inputTokens ?? 0
+    bucket.outputTokens += m.outputTokens ?? 0
+    bucket.cacheReadTokens += m.cacheReadTokens ?? 0
+    bucket.cacheCreationTokens += m.cacheCreationTokens ?? 0
   }
-  const estimatedCostUsd =
-    (totalInput / 1_000_000) * PRICE_INPUT +
-    (totalOutput / 1_000_000) * PRICE_OUTPUT +
-    (totalCacheRead / 1_000_000) * PRICE_CACHE_READ +
-    (totalCacheCreation / 1_000_000) * PRICE_CACHE_CREATION
-  const costWithoutCacheUsd =
-    ((totalInput + totalCacheRead + totalCacheCreation) / 1_000_000) * PRICE_INPUT +
-    (totalOutput / 1_000_000) * PRICE_OUTPUT
-  const cacheSavingsUsd = costWithoutCacheUsd - estimatedCostUsd
+
+  let estimatedCostUsd = 0
+  let costWithoutCacheTotalUsd = 0
+  for (const [model, bucket] of buckets) {
+    estimatedCostUsd += costUsd(bucket, model)
+    costWithoutCacheTotalUsd += costWithoutCacheUsd(bucket, model)
+  }
+  const cacheSavingsUsd = costWithoutCacheTotalUsd - estimatedCostUsd
   const totalInputLike = totalInput + totalCacheRead + totalCacheCreation
   const cacheHitRate = totalInputLike > 0 ? totalCacheRead / totalInputLike : 0
+
+  const modelBreakdown = Array.from(buckets.entries())
+    .map(([model, bucket]) => {
+      const cost = costUsd(bucket, model)
+      return {
+        model,
+        label: labelFor(model),
+        messages: bucket.messages,
+        inputTokens: bucket.inputTokens,
+        outputTokens: bucket.outputTokens,
+        cacheReadTokens: bucket.cacheReadTokens,
+        cacheCreationTokens: bucket.cacheCreationTokens,
+        costUsd: cost,
+        costPerMessageUsd: bucket.messages > 0 ? cost / bucket.messages : null,
+        prices: pricingFor(model),
+      }
+    })
+    .sort((a, b) => b.costUsd - a.costUsd)
+
+  // Modelo dominante do período (por custo). Usado nas estimativas que não
+  // conseguem ser feitas por mensagem, como o custo extra de fallback.
+  const primaryModel = modelBreakdown[0]?.model ?? CHAT_MODEL
+  const primaryPrices = pricingFor(primaryModel)
+
+  // Qualidade da resposta: truncamento por max_tokens e requisições que não
+  // chegaram ao fim (timeout do stream ou erro da API). Ver lib/pricing.ts e o
+  // stopReason gravado em app/api/chat/route.ts.
+  const truncatedCount = messages.filter((m) => m.stopReason === 'max_tokens').length
+  const truncationRate = totalMessages > 0 ? truncatedCount / totalMessages : 0
+  const failedCount = messages.filter(
+    (m) => m.stopReason === 'timeout' || m.stopReason === 'error'
+  ).length
 
   // RAG fallback metrics
   const fallbackMessages = messages.filter((m) => m.ragFallback)
@@ -228,18 +287,13 @@ export async function GET(req: NextRequest) {
       : null
   const fallbackCostUsd =
     avgInputRag != null && avgInputFallback != null
-      ? ((avgInputFallback - avgInputRag) / 1_000_000) * PRICE_INPUT * fallbackMessages.length
+      ? ((avgInputFallback - avgInputRag) / 1_000_000) * primaryPrices.input * fallbackMessages.length
       : null
 
   // Daily cost chart
   const costByDay = messages.reduce<Record<string, number>>((acc, msg) => {
     const day = msg.createdAt.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
-    const msgCost =
-      ((msg.inputTokens ?? 0) / 1_000_000) * PRICE_INPUT +
-      ((msg.outputTokens ?? 0) / 1_000_000) * PRICE_OUTPUT +
-      ((msg.cacheReadTokens ?? 0) / 1_000_000) * PRICE_CACHE_READ +
-      ((msg.cacheCreationTokens ?? 0) / 1_000_000) * PRICE_CACHE_CREATION
-    acc[day] = (acc[day] ?? 0) + msgCost
+    acc[day] = (acc[day] ?? 0) + costUsd(msg, msg.model)
     return acc
   }, {})
 
@@ -264,6 +318,10 @@ export async function GET(req: NextRequest) {
     fallbackRate,
     avgRagScore,
     fallbackCostUsd,
+    modelBreakdown,
+    truncatedCount,
+    truncationRate,
+    failedCount,
   }
 
   // Cost per message — hoje vs. ontem (independente do período selecionado)
@@ -271,28 +329,43 @@ export async function GET(req: NextRequest) {
   const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000)
   const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000)
 
-  const [todayAgg, yesterdayAgg] = await Promise.all([
-    prisma.message.aggregate({
+  // Agrupado por modelo para que o custo por mensagem seja precificado com o
+  // preço de quem atendeu, e não com um preço único assumido para o período.
+  const [todayGroups, yesterdayGroups] = await Promise.all([
+    prisma.message.groupBy({
+      by: ['model'],
       where: { ...cpmWhere, createdAt: { gte: todayStart, lt: tomorrowStart } },
       _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
       _count: { id: true },
     }),
-    prisma.message.aggregate({
+    prisma.message.groupBy({
+      by: ['model'],
       where: { ...cpmWhere, createdAt: { gte: yesterdayStart, lt: todayStart } },
       _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
       _count: { id: true },
     }),
   ])
 
-  const costFromAgg = (agg: typeof todayAgg) =>
-    ((agg._sum.inputTokens ?? 0) / 1_000_000) * PRICE_INPUT +
-    ((agg._sum.outputTokens ?? 0) / 1_000_000) * PRICE_OUTPUT +
-    ((agg._sum.cacheReadTokens ?? 0) / 1_000_000) * PRICE_CACHE_READ +
-    ((agg._sum.cacheCreationTokens ?? 0) / 1_000_000) * PRICE_CACHE_CREATION
+  const costPerMessageFromGroups = (groups: typeof todayGroups) => {
+    let cost = 0
+    let count = 0
+    for (const g of groups) {
+      cost += costUsd(
+        {
+          inputTokens: g._sum.inputTokens,
+          outputTokens: g._sum.outputTokens,
+          cacheReadTokens: g._sum.cacheReadTokens,
+          cacheCreationTokens: g._sum.cacheCreationTokens,
+        },
+        g.model
+      )
+      count += g._count.id
+    }
+    return count > 0 ? cost / count : null
+  }
 
-  const costPerMessageToday = todayAgg._count.id > 0 ? costFromAgg(todayAgg) / todayAgg._count.id : null
-  const costPerMessageYesterday =
-    yesterdayAgg._count.id > 0 ? costFromAgg(yesterdayAgg) / yesterdayAgg._count.id : null
+  const costPerMessageToday = costPerMessageFromGroups(todayGroups)
+  const costPerMessageYesterday = costPerMessageFromGroups(yesterdayGroups)
   const costPerMessageDeltaPercent =
     costPerMessageToday != null && costPerMessageYesterday != null && costPerMessageYesterday > 0
       ? ((costPerMessageToday - costPerMessageYesterday) / costPerMessageYesterday) * 100
