@@ -198,6 +198,143 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
 })
 
+/**
+ * Monta o bloco estável do system: instruções fixas globais mais as do cliente
+ * efetivo, sem o prompt base.
+ *
+ * Extraído da rota (issue #64) por dois motivos. O primeiro é que o pre-warm do
+ * cache, se for implementado, precisa produzir um prefixo byte a byte idêntico ao
+ * da requisição real, e a única forma de garantir isso é chamar a mesma função,
+ * não manter uma cópia do texto. O segundo é que antes este texto era concatenado
+ * dentro de um único `systemPrompt` e depois recortado de volta por offset
+ * (`slice(BASE.length, dynamicContentStart)`): um prefixo cacheado não deveria
+ * depender de aritmética de índices para ser reconstruído.
+ *
+ * Cada leitura fica em seu próprio try/catch, como antes: falhar em carregar as
+ * instruções de um cliente não deve derrubar a resposta, e a categoria só entra
+ * em `injectedCategories` quando a query de fato ocorreu, senão o fallback
+ * deixaria de reenviar documentos que nunca foram injetados.
+ */
+async function buildStaticClientPrompt(effectiveClient: string | null): Promise<{
+  text: string
+  /**
+   * Categorias cujos documentos já entraram no bloco estável. O fallback de RAG
+   * consulta este Set para não reenviar o mesmo conteúdo duplicado.
+   */
+  injectedCategories: Set<string>
+}> {
+  const parts: string[] = []
+  const injectedCategories = new Set<string>()
+
+  // Instruções fixas globais, sempre, independente de cliente.
+  try {
+    const fixedDocs = await prisma.document.findMany({
+      where: { active: true, category: 'instrucoes-fixas' },
+      orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+      select: { name: true, content: true },
+    })
+    injectedCategories.add('instrucoes-fixas')
+    if (fixedDocs.length > 0) {
+      const fixedText = fixedDocs
+        .map(doc => `### ${doc.name}\n\n${doc.content}`)
+        .join('\n\n---\n\n')
+      parts.push(`## Instruções Operacionais Fixas\n\n${fixedText}`)
+    }
+  } catch (err) {
+    console.warn('[chat] Falha ao carregar instruções fixas:', err)
+  }
+
+  // Instruções específicas do cliente efetivo.
+  try {
+    const clientInstructions: Array<{ clientId: string; categories: string[] }> = [
+      { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'] },
+      { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'] },
+      { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'] },
+    ]
+
+    for (const { clientId, categories } of clientInstructions) {
+      if (effectiveClient === clientId) {
+        const clientDocs = await prisma.document.findMany({
+          where: { active: true, category: { in: categories } },
+          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+          select: { name: true, content: true },
+        })
+        categories.forEach(c => injectedCategories.add(c))
+        if (clientDocs.length > 0) {
+          const clientText = clientDocs
+            .map(doc => `### ${doc.name}\n\n${doc.content}`)
+            .join('\n\n---\n\n')
+          parts.push(`## Instruções Operacionais — ${categories[0]}\n\n${clientText}`)
+        } else {
+          parts.push(`> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[chat] Falha ao carregar instruções por cliente:', err)
+  }
+
+  return { text: parts.join('\n\n'), injectedCategories }
+}
+
+/**
+ * Monta os blocos de system na ordem que o cache de prompt exige: do mais estável
+ * para o mais volátil, porque cache de prompt é casamento de prefixo e um bloco
+ * que muda invalida tudo que vem depois dele.
+ *
+ * ORÇAMENTO DE BREAKPOINTS: a API permite no máximo 4 por requisição. O pior caso
+ * aqui usa 3, com base, staticClientText e fallbackText. Sobra 1 de folga; ao
+ * usá-la, confirme que o prefixo até o novo breakpoint é estável entre
+ * requisições, senão o efeito é apenas pagar a sobretaxa de gravação.
+ *
+ * TTL DE 1 h (issue #64): os três blocos estáveis usam `ttl: '1h'` em vez dos
+ * 5 min padrão. O perfil de uso é de ferramenta interna, com poucos operadores
+ * fazendo perguntas pontuais ao longo do dia, e um intervalo maior que 5 min
+ * entre mensagens é o caso comum, não a exceção, tanto que o cliente reseta a
+ * sessão por inatividade nessa mesma ordem de grandeza. Com TTL de 5 min o
+ * prefixo estável era regravado a cada pergunta, a 1,25x na gravação em vez de
+ * 0,10x na leitura. A gravação de 1 h custa 2,00x, o que move o ponto de
+ * equilíbrio de 2 para 3 leituras dentro da janela, folgado em um dia útil.
+ */
+function buildSystemBlocks(input: {
+  /** Instruções fixas mais as do cliente efetivo. Vazio quando não há nenhuma. */
+  staticClientText: string
+  /** Dump de documentos do fallback. Vazio quando o RAG funcionou. */
+  fallbackText: string
+  /** Aviso de escopo, formato Bradesco e trechos de RAG. Muda a cada pergunta. */
+  dynamicText: string
+}): Anthropic.TextBlockParam[] {
+  const blocks: Anthropic.TextBlockParam[] = [
+    {
+      type: 'text',
+      text: BASE_SYSTEM_PROMPT,
+      cache_control: STABLE_CACHE_CONTROL,
+    },
+  ]
+
+  const staticClientText = input.staticClientText.trim()
+  if (staticClientText) {
+    blocks.push({ type: 'text', text: staticClientText, cache_control: STABLE_CACHE_CONTROL })
+  }
+
+  // Dump do fallback: determinístico por (escopo de cliente, docs ativos), então
+  // é cacheado, diferente dos trechos de RAG, que variam por pergunta. Fica antes
+  // do bloco dinâmico para manter o prefixo cacheável estável.
+  const fallbackText = input.fallbackText.trim()
+  if (fallbackText) {
+    blocks.push({ type: 'text', text: fallbackText, cache_control: STABLE_CACHE_CONTROL })
+  }
+
+  // Sem cache_control de propósito: o conteúdo não repete entre requisições, e
+  // marcá-lo cobraria a sobretaxa de gravação sem nunca gerar leitura.
+  const dynamicText = input.dynamicText.trim()
+  if (dynamicText) {
+    blocks.push({ type: 'text', text: dynamicText })
+  }
+
+  return blocks
+}
+
 export async function POST(req: NextRequest) {
   // Verify operator auth
   const authToken = req.cookies.get('sbk_auth_token')?.value
@@ -376,90 +513,38 @@ export async function POST(req: NextRequest) {
     // Trust model: ADMIN IS TRUSTED — only authenticated admins can upload
     // documents.  Operator-submitted content (chat messages) is never injected
     // into the system prompt, only into user-role messages.
-    let systemPrompt = BASE_SYSTEM_PROMPT
+    // Bloco estável do system: instruções fixas mais as do cliente efetivo. Só
+    // muda quando um admin altera os documentos ativos ou o cliente efetivo
+    // muda, então é ele que carrega o cache_control com TTL longo.
+    const { text: staticClientText, injectedCategories } =
+      await buildStaticClientPrompt(effectiveClient)
 
-    // Categorias cujos documentos já foram injetados no bloco estático do
-    // prompt. O fallback de RAG consulta este Set para não reenviar o mesmo
-    // conteúdo duplicado. Populado apenas quando a injeção de fato ocorre
-    // (as queries abaixo estão em try/catch — se falharem, a categoria não é
-    // marcada e o fallback volta a incluir os docs do cliente).
-    const injectedCategories = new Set<string>()
-
-    // Injeta instruções fixas globais — sempre, independente de cliente
-    try {
-      const fixedDocs = await prisma.document.findMany({
-        where: { active: true, category: 'instrucoes-fixas' },
-        orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-        select: { name: true, content: true },
-      })
-      injectedCategories.add('instrucoes-fixas')
-      if (fixedDocs.length > 0) {
-        const fixedText = fixedDocs
-          .map(doc => `### ${doc.name}\n\n${doc.content}`)
-          .join('\n\n---\n\n')
-        systemPrompt += `\n\n## Instruções Operacionais Fixas\n\n${fixedText}`
-      }
-    } catch (err) {
-      console.warn('[chat] Falha ao carregar instruções fixas:', err)
-    }
-
-    // Injeta instruções específicas por cliente com base no cliente efetivo
-    try {
-      const clientInstructions: Array<{ clientId: string; categories: string[]; regex: RegExp }> = [
-        { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
-        { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
-        { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'],           regex: /\bcwt\b/i },
-      ]
-
-      for (const { clientId, categories } of clientInstructions) {
-        if (effectiveClient === clientId) {
-          const clientDocs = await prisma.document.findMany({
-            where: { active: true, category: { in: categories } },
-            orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-            select: { name: true, content: true },
-          })
-          categories.forEach(c => injectedCategories.add(c))
-          if (clientDocs.length > 0) {
-            const clientText = clientDocs
-              .map(doc => `### ${doc.name}\n\n${doc.content}`)
-              .join('\n\n---\n\n')
-            systemPrompt += `\n\n## Instruções Operacionais — ${categories[0]}\n\n${clientText}`
-          } else {
-            systemPrompt += `\n\n> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[chat] Falha ao carregar instruções por cliente:', err)
-    }
-
-    // CACHE BOUNDARY: tudo acima deste ponto (prompt fixo + instruções por
-    // cliente) só muda quando um admin altera os documentos ativos ou o
-    // cliente efetivo muda — é reaproveitado como bloco de cache separado.
-    // O que vem a seguir (aviso de escopo, formato Bradesco condicional e
-    // trechos de RAG) varia por pergunta e por isso NÃO é marcado para cache.
-    // O dump de documentos do fallback, por outro lado, é determinístico por
-    // escopo de cliente e vira um bloco cacheado PRÓPRIO (fallbackText), fora
-    // do systemPrompt — ver montagem dos systemBlocks abaixo.
-    const dynamicContentStart = systemPrompt.length
+    // FRONTEIRA DE CACHE: o que vem daqui para baixo (aviso de escopo, formato
+    // Bradesco condicional e trechos de RAG) varia por pergunta e por isso NÃO é
+    // marcado para cache. Ele é acumulado separado do bloco estável, e não
+    // concatenado num único string para ser recortado por offset depois, porque
+    // um prefixo que precisa ser byte a byte estável não deve depender de
+    // aritmética de índices para ser reconstruído.
+    //
+    // O dump de documentos do fallback é caso à parte: é determinístico por
+    // escopo de cliente e vira um bloco cacheado próprio (fallbackText).
+    const dynamicParts: string[] = []
 
     // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude
-    // a avisar. Fica APÓS a fronteira de cache: o texto varia por mensagem e,
-    // dentro do prefixo cacheado, invalidaria o cache do bloco estático inteiro.
+    // a avisar. Fica depois da fronteira de cache: o texto varia por mensagem e,
+    // dentro do prefixo cacheado, invalidaria o cache do bloco estável inteiro.
     if (clientMismatchNote) {
       const CLIENT_DISPLAY: Record<string, string> = {
         bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
       }
       const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
       const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
-      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
+      dynamicParts.push(`> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`)
     }
 
     // Bradesco: substitui o formato genérico de classificação pelo formato específico
     if (effectiveClient === 'bradesco' && isPetition) {
-      systemPrompt += `
-
-## FORMATO DE CLASSIFICAÇÃO BRADESCO
+      dynamicParts.push(`## FORMATO DE CLASSIFICAÇÃO BRADESCO
 
 Quando o operador enviar uma petição do Bradesco para classificação, IGNORE o formato genérico (CLASSIFICAÇÃO / CADASTRAR / FUNDAMENTO) e responda EXCLUSIVAMENTE neste formato, sem adicionar seções extras ou texto fora dele:
 
@@ -484,8 +569,7 @@ Regras obrigatórias:
 - AUTORES ADICIONAIS: listar todos os autores com nome completo e CPF; se não houver além do principal, indicar explicitamente
 - GESTOR SECUNDÁRIO 4230 (PATRIMÔNIO): incluir obrigatoriamente quando houver imóvel, bem alienado fiduciariamente, leasing ou questão ambiental envolvida diretamente na demanda
 - Se algum código não for encontrado na documentação disponível, escrever: "Código não localizado — escalar para suporte SBK"
-- Não adicionar texto fora dos campos acima
-`
+- Não adicionar texto fora dos campos acima`)
     }
 
     const CONTEXT_CHAR_CAP = 80_000
@@ -596,7 +680,9 @@ Regras obrigatórias:
           )
           .join('\n\n---\n\n')
 
-        systemPrompt += `\n\n## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
+        dynamicParts.push(
+          `## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
+        )
       }
     } catch (ragError: unknown) {
       const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
@@ -698,67 +784,11 @@ Regras obrigatórias:
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          // ORÇAMENTO DE CACHE BREAKPOINTS: a API permite no máximo 4 por
-          // requisição. O pior caso aqui usa 3 — base(1) + staticClientText(2)
-          // + fallbackText(3). Sobra 1 de folga; ao usá-la, confirme que o
-          // prefixo até o novo breakpoint é estável entre requisições, senão o
-          // efeito é apenas pagar a sobretaxa de gravação (ver a nota do
-          // histórico, mais abaixo).
-          //
-          // TTL DE 1 h (issue #64): os três blocos abaixo usam `ttl: '1h'` em
-          // vez dos 5 min padrão. O perfil de uso é de ferramenta interna:
-          // poucos operadores, perguntas pontuais ao longo do dia, e um
-          // intervalo maior que 5 min entre mensagens é o caso comum, não a
-          // exceção, tanto que o cliente reseta a sessão por inatividade nessa
-          // mesma ordem de grandeza. Com TTL de 5 min o prefixo estático era
-          // regravado a cada pergunta: a 1,25x na gravação em vez de 0,10x na
-          // leitura. A gravação de 1 h custa 2,00x, o que move o ponto de
-          // equilíbrio de 2 para 3 leituras dentro da janela. Em uma hora de
-          // dia útil isso é folgado. O TTL só vale para blocos estáveis por
-          // definição; o bloco dinâmico abaixo (trechos de RAG) segue sem
-          // cache_control nenhum.
-          //
-          // Bloco estático por cliente (documentos fixos + instruções do cliente
-          // efetivo): muda raramente, então recebe seu próprio cache_control
-          // para ser reaproveitado entre requisições consecutivas do mesmo cliente.
-          const staticClientText = systemPrompt.slice(BASE_SYSTEM_PROMPT.length, dynamicContentStart).trim()
-          // Bloco dinâmico (aviso de escopo + formato Bradesco condicional +
-          // trechos de RAG): muda a cada pergunta, então NÃO recebe cache_control
-          // — ver nota acima do dynamicContentStart sobre o custo de cachear
-          // conteúdo que não repete.
-          const dynamicText = systemPrompt.slice(dynamicContentStart).trim()
-
-          const systemBlocks: Anthropic.TextBlockParam[] = [
-            {
-              type: 'text',
-              text: BASE_SYSTEM_PROMPT,
-              cache_control: STABLE_CACHE_CONTROL,
-            },
-          ]
-          if (staticClientText) {
-            systemBlocks.push({
-              type: 'text',
-              text: staticClientText,
-              cache_control: STABLE_CACHE_CONTROL,
-            })
-          }
-          // Dump de documentos do fallback: determinístico por (escopo de
-          // cliente, docs ativos), então é cacheado — diferente dos chunks de
-          // RAG, que variam por pergunta. Fica antes do bloco dinâmico para
-          // manter o prefixo cacheável estável.
-          if (fallbackText) {
-            systemBlocks.push({
-              type: 'text',
-              text: fallbackText,
-              cache_control: STABLE_CACHE_CONTROL,
-            })
-          }
-          if (dynamicText) {
-            systemBlocks.push({
-              type: 'text',
-              text: dynamicText,
-            })
-          }
+          const systemBlocks = buildSystemBlocks({
+            staticClientText,
+            fallbackText,
+            dynamicText: dynamicParts.join('\n\n'),
+          })
 
           // O histórico NÃO é marcado para cache. Cache de prompt é casamento de
           // prefixo, e o prefixo até o histórico inclui dynamicText (trechos de
