@@ -85,6 +85,7 @@ interface ModelPrices {
   output: number
   cacheRead: number
   cacheCreation: number
+  cacheCreation1h: number
 }
 
 interface ModelBreakdownEntry {
@@ -94,7 +95,10 @@ interface ModelBreakdownEntry {
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
+  /** Total gravado no cache, somando as duas faixas de TTL. */
   cacheCreationTokens: number
+  cacheCreation5mTokens: number
+  cacheCreation1hTokens: number
   costUsd: number
   costPerMessageUsd: number | null
   prices: ModelPrices
@@ -112,6 +116,10 @@ interface CostData {
   avgRagScore: number | null
   fallbackCostUsd: number | null
   // Opcionais para tolerar uma resposta antiga em cache do navegador.
+  // totalCacheCreation5m e totalCacheCreation1h são a quebra de
+  // totalCacheCreation por faixa de TTL, que têm preços diferentes.
+  totalCacheCreation5m?: number
+  totalCacheCreation1h?: number
   modelBreakdown?: ModelBreakdownEntry[]
   truncatedCount?: number
   truncationRate?: number
@@ -125,19 +133,45 @@ interface CostPerMessageData {
 }
 
 /**
- * Linhas da tabela de tokens. `totalKey` é o total do período (sempre presente),
- * `tokenKey` e `priceKey` são usados para somar o custo por modelo.
+ * Linhas da tabela de tokens. `totalKey` é o total do período, `tokenKey` e
+ * `priceKey` são usados para somar o custo por modelo.
+ *
+ * As gravações de cache aparecem em duas linhas porque as duas faixas de TTL têm
+ * preços diferentes: 1,25x da entrada nos 5 min padrão e 2,00x na de 1 h. Juntar
+ * as duas em uma linha só multiplicaria o total por um preço único e faria a
+ * coluna de custo desta tabela divergir do custo estimado do período.
  */
 const TOKEN_ROWS: Array<{
   label: string
-  totalKey: 'totalInput' | 'totalOutput' | 'totalCacheRead' | 'totalCacheCreation'
-  tokenKey: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'
+  totalKey:
+    | 'totalInput'
+    | 'totalOutput'
+    | 'totalCacheRead'
+    | 'totalCacheCreation5m'
+    | 'totalCacheCreation1h'
+  tokenKey:
+    | 'inputTokens'
+    | 'outputTokens'
+    | 'cacheReadTokens'
+    | 'cacheCreation5mTokens'
+    | 'cacheCreation1hTokens'
   priceKey: keyof ModelPrices
 }> = [
   { label: 'Input', totalKey: 'totalInput', tokenKey: 'inputTokens', priceKey: 'input' },
   { label: 'Output', totalKey: 'totalOutput', tokenKey: 'outputTokens', priceKey: 'output' },
   { label: 'Cache read', totalKey: 'totalCacheRead', tokenKey: 'cacheReadTokens', priceKey: 'cacheRead' },
-  { label: 'Cache creation', totalKey: 'totalCacheCreation', tokenKey: 'cacheCreationTokens', priceKey: 'cacheCreation' },
+  {
+    label: 'Cache creation (5 min)',
+    totalKey: 'totalCacheCreation5m',
+    tokenKey: 'cacheCreation5mTokens',
+    priceKey: 'cacheCreation',
+  },
+  {
+    label: 'Cache creation (1 h)',
+    totalKey: 'totalCacheCreation1h',
+    tokenKey: 'cacheCreation1hTokens',
+    priceKey: 'cacheCreation1h',
+  },
 ]
 
 
@@ -522,15 +556,21 @@ function AnalyticsPanel() {
                 <tbody className="divide-y divide-brand-verde-escuro/[0.04]">
                   {TOKEN_ROWS.map((row) => {
                     const models = costData.modelBreakdown ?? []
+                    // Os `?? 0` cobrem uma resposta antiga em cache do navegador,
+                    // gravada antes das linhas por faixa de TTL existirem: sem
+                    // eles a aritmética produziria NaN e a célula mostraria "$NaN"
+                    // em vez de zero.
                     const cost = models.reduce(
-                      (sum, m) => sum + (m[row.tokenKey] / 1_000_000) * m.prices[row.priceKey],
+                      (sum, m) => sum + ((m[row.tokenKey] ?? 0) / 1_000_000) * (m.prices[row.priceKey] ?? 0),
                       0
                     )
-                    const distinctPrices = Array.from(new Set(models.map((m) => m.prices[row.priceKey])))
+                    const distinctPrices = Array.from(
+                      new Set(models.map((m) => m.prices[row.priceKey] ?? 0))
+                    )
                     return (
                       <tr key={row.label}>
                         <td className="py-2 text-brand-verde-escuro">{row.label}</td>
-                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{costData[row.totalKey].toLocaleString('pt-BR')}</td>
+                        <td className="py-2 text-right font-mono text-brand-cinza-chumbo">{(costData[row.totalKey] ?? 0).toLocaleString('pt-BR')}</td>
                         <td className="py-2 text-right font-mono text-brand-verde-escuro">
                           {models.length > 0 ? `$${cost.toFixed(4)}` : '-'}
                         </td>

@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "_comentario": [
+    "ESTE É UM EXEMPLO DE FORMATO, NÃO UM GOLDEN SET UTILIZÁVEL.",
+    "Os valores aqui são inventados e servem apenas para mostrar a estrutura de",
+    "cada tipo de caso. Não copie para golden-set.json: um conjunto com respostas",
+    "esperadas fabricadas é pior que nenhum conjunto, porque aprova o que nunca foi",
+    "conferido. Gere o seu com 'npm run eval:extract' e revise à mão."
+  ],
+  "cases": [
+    {
+      "id": "exemplo_peticao_bradesco",
+      "track": "petition",
+      "question": "EXCELENTÍSSIMO SENHOR DOUTOR JUIZ... (texto integral da petição inicial, acima de 400 caracteres, que é o que a rota usa para detectar o modo de classificação)",
+      "client": "bradesco",
+      "notes": "Formato Bradesco. Os códigos são o que precisa sair certo.",
+      "expectedFields": {
+        "GESTOR PRINCIPAL": "4210",
+        "AGÊNCIA": "1234",
+        "COD_TIPO": "55",
+        "COD_SUBTIPO": "912",
+        "GESTOR SECUNDÁRIO": "4230"
+      }
+    },
+    {
+      "id": "exemplo_peticao_generica",
+      "track": "petition",
+      "question": "EXCELENTÍSSIMO SENHOR DOUTOR JUIZ... (petição de um cliente que usa o formato genérico)",
+      "client": "agibank",
+      "notes": "Formato genérico: Produto, Causa raiz, Contrato e Cliente.",
+      "expectedFields": {
+        "Produto": "Cartão de Crédito",
+        "Causa raiz": "Cobrança indevida",
+        "Contrato": "998877",
+        "Cliente": "Agibank"
+      }
+    },
+    {
+      "id": "exemplo_pergunta_aberta",
+      "track": "open",
+      "question": "Qual o prazo para responder um ofício do Bradesco?",
+      "client": "bradesco",
+      "notes": "Pergunta curta, do tipo que domina o volume.",
+      "criteria": [
+        "Informa um prazo numérico específico, em destaque",
+        "O prazo informado é o do fluxo de ofícios do Bradesco, não de outro cliente",
+        "Não mistura o prazo de ofício com o de citação"
+      ]
+    },
+    {
+      "id": "exemplo_escalada",
+      "track": "open",
+      "question": "Qual o procedimento de rescisão contratual da Zurich para apólices coletivas?",
+      "client": "zurich",
+      "notes": "A documentação não cobre este fluxo. A resposta certa é escalar. Caso frágil: afrouxar a recuperação faz o modelo inventar em vez de escalar, e isso não aparece na taxa de acerto geral.",
+      "expectEscalation": true,
+      "criteria": [
+        "Diz explicitamente que não encontrou a informação na documentação",
+        "Orienta escalar para o suporte SBK",
+        "Não inventa etapas, prazos ou nomes de sistema"
+      ]
+    },
+    {
+      "id": "exemplo_clarificacao",
+      "track": "open",
+      "question": "Qual o prazo de resposta?",
+      "client": null,
+      "notes": "Pergunta ambígua sem cliente. A regra 1 do prompt base manda perguntar antes de responder.",
+      "criteria": [
+        "Faz UMA pergunta de clarificação pedindo o cliente",
+        "Não responde com o prazo de um cliente escolhido por conta própria",
+        "Não faz mais de uma pergunta"
+      ]
+    }
+  ]
+}

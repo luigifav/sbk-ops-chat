@@ -9,9 +9,16 @@
  * trocar de modelo obrigue a mexer nesta tabela.
  *
  * Todos os valores em USD por 1M de tokens. Os multiplicadores de cache são os
- * da Anthropic: leitura 0,10x da entrada, gravação 1,25x da entrada com TTL de
- * 5 minutos (o TTL padrão, que é o usado aqui — não passamos `ttl: '1h'`, que
- * custaria 2,00x).
+ * da Anthropic: leitura 0,10x da entrada e gravação 1,25x da entrada com TTL de
+ * 5 min ou 2,00x com TTL de 1 h.
+ *
+ * Os dois preços de gravação coexistem porque o TTL mudou no meio da série
+ * histórica: os blocos estáveis do system passaram a usar `ttl: '1h'` (issue
+ * #64), mas as mensagens gravadas antes disso pagaram 1,25x. Precificar tudo a
+ * 2,00x reescreveria o passado para cima e inventaria uma economia na
+ * comparação antes/depois; precificar tudo a 1,25x subestimaria toda gravação
+ * nova em 37,5%. Por isso `Message` guarda quanto de `cacheCreationTokens` foi
+ * gravado com TTL de 1 h, e cada parcela é cobrada pelo seu próprio preço.
  */
 
 export interface ModelPricing {
@@ -21,8 +28,10 @@ export interface ModelPricing {
   output: number
   /** Tokens lidos de um bloco de cache existente (0,10x da entrada). */
   cacheRead: number
-  /** Tokens gravados no cache, TTL de 5 min (1,25x da entrada). */
+  /** Tokens gravados no cache com TTL de 5 min (1,25x da entrada). */
   cacheCreation: number
+  /** Tokens gravados no cache com TTL de 1 h (2,00x da entrada). */
+  cacheCreation1h: number
 }
 
 /** Modelo que atende o chat (`app/api/chat/route.ts`). */
@@ -39,8 +48,20 @@ export const THEME_MODEL = 'claude-haiku-4-5-20251001'
 export const EMBEDDING_MODEL = 'voyage-3'
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  'claude-sonnet-4-6': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheCreation: 3.75 },
-  'claude-haiku-4-5-20251001': { input: 1.0, output: 5.0, cacheRead: 0.1, cacheCreation: 1.25 },
+  'claude-sonnet-4-6': {
+    input: 3.0,
+    output: 15.0,
+    cacheRead: 0.3,
+    cacheCreation: 3.75,
+    cacheCreation1h: 6.0,
+  },
+  'claude-haiku-4-5-20251001': {
+    input: 1.0,
+    output: 5.0,
+    cacheRead: 0.1,
+    cacheCreation: 1.25,
+    cacheCreation1h: 2.0,
+  },
 }
 
 /** Rótulos curtos para exibição no dashboard. */
@@ -91,17 +112,37 @@ export interface TokenUsage {
   inputTokens?: number | null
   outputTokens?: number | null
   cacheReadTokens?: number | null
+  /** Total gravado no cache, somando as duas faixas de TTL. */
   cacheCreationTokens?: number | null
+  /**
+   * Parcela de `cacheCreationTokens` gravada com TTL de 1 h. Ausente ou nula nas
+   * linhas anteriores ao TTL de 1 h, que são integralmente de 5 min.
+   */
+  cacheCreation1hTokens?: number | null
+}
+
+/**
+ * Divide o total gravado no cache entre as duas faixas de TTL. A parcela de 5
+ * min é derivada por subtração em vez de gravada, para que `cacheCreationTokens`
+ * siga sendo o total e nenhuma soma histórica precise ser reinterpretada. O
+ * `Math.max` protege contra uma linha inconsistente devolver um 5m negativo.
+ */
+export function splitCacheCreation(usage: TokenUsage): { tokens5m: number; tokens1h: number } {
+  const total = usage.cacheCreationTokens ?? 0
+  const tokens1h = Math.min(usage.cacheCreation1hTokens ?? 0, total)
+  return { tokens5m: Math.max(0, total - tokens1h), tokens1h }
 }
 
 /** Custo em USD do uso de tokens informado, precificado pelo modelo. */
 export function costUsd(usage: TokenUsage, model: string | null | undefined): number {
   const p = pricingFor(model)
+  const { tokens5m, tokens1h } = splitCacheCreation(usage)
   return (
     ((usage.inputTokens ?? 0) / 1_000_000) * p.input +
     ((usage.outputTokens ?? 0) / 1_000_000) * p.output +
     ((usage.cacheReadTokens ?? 0) / 1_000_000) * p.cacheRead +
-    ((usage.cacheCreationTokens ?? 0) / 1_000_000) * p.cacheCreation
+    (tokens5m / 1_000_000) * p.cacheCreation +
+    (tokens1h / 1_000_000) * p.cacheCreation1h
   )
 }
 
@@ -109,6 +150,10 @@ export function costUsd(usage: TokenUsage, model: string | null | undefined): nu
  * Custo que o mesmo uso teria sem nenhum cache: todo token de cache (lido ou
  * gravado) cobrado como entrada normal. A diferença contra `costUsd` é a
  * economia atribuída ao cache de prompt.
+ *
+ * A faixa de TTL não entra na conta aqui: sem cache não existe gravação, e as
+ * duas parcelas colapsam no mesmo preço de entrada. Por isso o cálculo usa
+ * `cacheCreationTokens` (o total) direto, sem dividir por TTL.
  */
 export function costWithoutCacheUsd(
   usage: TokenUsage,

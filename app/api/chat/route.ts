@@ -7,6 +7,8 @@ import { classifyAndSaveTheme } from '@/lib/theme'
 import { recordRagOutcome } from '@/lib/ragHealth'
 import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 import { CHAT_MODEL } from '@/lib/pricing'
+import { getChatTuning } from '@/lib/chatTuning'
+import { isEvalOperator } from '@/lib/evalMode'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +16,16 @@ export const dynamic = 'force-dynamic'
 // Enforced via Redis (lib/ratelimit.ts) when UPSTASH_REDIS_REST_URL/TOKEN are
 // set, so the limit holds across concurrent serverless instances; otherwise
 // falls back to an in-memory counter local to each instance.
-const CHAT_LIMIT = 60
+// Configurável por CHAT_HOURLY_LIMIT, mesmo padrão do teto diário abaixo. O
+// motivo de existir é o harness de avaliação (issue #60): um conjunto de 40 a 60
+// casos estoura 60 mensagens por hora e a rodada morre no meio. A instância que
+// roda o eval sobe o teto por ambiente, sem que nada no código contorne o limite.
+const CHAT_HOURLY_LIMIT_DEFAULT = 60
+const parsedHourlyLimit = Number.parseInt(process.env.CHAT_HOURLY_LIMIT ?? '', 10)
+const CHAT_LIMIT =
+  Number.isFinite(parsedHourlyLimit) && parsedHourlyLimit > 0
+    ? parsedHourlyLimit
+    : CHAT_HOURLY_LIMIT_DEFAULT
 const CHAT_WINDOW = 60 * 60 * 1_000
 
 // Segundo teto, em janela de 24 h, sobre a mesma chave. O limite horário sozinho
@@ -31,21 +42,63 @@ const CHAT_DAILY_WINDOW = 24 * 60 * 60 * 1_000
 // Streaming timeout: abort Claude stream if no response after 60 seconds.
 const STREAM_TIMEOUT_MS = 60_000
 
-// Teto de tokens de saída por resposta. Quando é atingido, a API encerra o
-// stream com stop_reason 'max_tokens' e o texto chega cortado ao operador — o
-// caso é detectado abaixo e sinalizado explicitamente na resposta.
-const MAX_RESPONSE_TOKENS = 2048
-
 // Aviso anexado ao stream quando a resposta é cortada pelo teto de tokens.
 // Uma classificação cortada é pior que nenhuma, porque parece completa.
-const TRUNCATION_NOTICE =
-  '\n\n**Aviso: esta resposta está incompleta.** O limite de tamanho ' +
-  `(${MAX_RESPONSE_TOKENS} tokens de saída) foi atingido e o texto acima foi ` +
-  'cortado no meio. Peça a continuação ou escale para o suporte SBK antes de ' +
-  'usar este conteúdo.'
+//
+// O teto virou parâmetro (issue #65): ele varia por modo e é configurável em
+// Setting, então o aviso precisa citar o valor que de fato limitou a resposta.
+// Um aviso com o número errado é pior que um aviso genérico, porque manda o
+// operador investigar o lugar errado.
+function truncationNotice(maxTokens: number): string {
+  return (
+    '\n\n**Aviso: esta resposta está incompleta.** O limite de tamanho ' +
+    `(${maxTokens} tokens de saída) foi atingido e o texto acima foi ` +
+    'cortado no meio. Peça a continuação ou escale para o suporte SBK antes de ' +
+    'usar este conteúdo.'
+  )
+}
 
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
+
+// AJUSTE DO RAG (issue #61)
+//
+// Quantos trechos entram de fato no prompt.
+const RAG_CHUNK_LIMIT = 6
+// Quantos candidatos a consulta pede ao índice antes do corte. É maior que o
+// limite acima de propósito: `d.active` e o filtro de cliente são avaliados
+// DEPOIS da varredura do índice vetorial, então pedir só 6 ao banco significa
+// que todo candidato descartado pelo filtro sai do resultado sem ser reposto, e
+// a consulta devolve menos de 6, ou até zero, mesmo havendo trechos relevantes
+// daquele cliente no corpus. Candidato sobrando é barato: o corte acontece antes
+// de montar o prompt, então nada disso é cobrado em tokens de entrada.
+const RAG_CANDIDATE_LIMIT = 30
+// `hnsw.ef_search` da consulta. O padrão do pgvector é 40, e ele é o teto de
+// candidatos que a varredura do índice devolve: antes do JOIN, portanto antes do
+// filtro de cliente. Medido em corpus sintético de 2.400 chunks com o filtro de
+// cliente de produção: com ef_search 40 e LIMIT 30, a consulta trazia 21,7 linhas
+// em média em vez de 30, porque o índice esgotava os 40 candidatos e o filtro
+// descartava parte deles. Com 120 as 30 vêm completas. Ou seja, sem subir este
+// valor o over-fetch acima é decorativo: pedir mais candidatos não adianta se o
+// índice não os oferece.
+const RAG_EF_SEARCH = 120
+// Piso de similaridade (1 - distância cosseno) para um trecho ser usado. Abaixo
+// dele a documentação recuperada não sustenta a resposta e o fallback é preferível.
+const RAG_MIN_SCORE = 0.55
+// Teto de distância aplicado no SQL. Mais frouxo que RAG_MIN_SCORE de propósito:
+// aqui ele serve só para limitar o volume trazido do banco, enquanto o piso de
+// relevância de verdade é aplicado em JS. A folga entre os dois deixa os
+// candidatos que passaram perto visíveis no log de fallback, que é o diagnóstico
+// de quem tenta separar "índice não achou" de "o corpus não tem a resposta".
+const RAG_CANDIDATE_MAX_DISTANCE = 0.6
+
+// cache_control dos blocos estáveis do system, declarado uma única vez para que
+// os três breakpoints não divirjam de TTL com o tempo. O motivo de 1 h está na
+// nota de ORÇAMENTO DE CACHE BREAKPOINTS, na montagem dos systemBlocks.
+const STABLE_CACHE_CONTROL: Anthropic.CacheControlEphemeral = {
+  type: 'ephemeral',
+  ttl: '1h',
+}
 
 // PISO DE CACHE: este bloco é o primeiro breakpoint de cache do system (ver a
 // montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 4.6 é de
@@ -158,6 +211,143 @@ Regras obrigatórias:
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
 })
+
+/**
+ * Monta o bloco estável do system: instruções fixas globais mais as do cliente
+ * efetivo, sem o prompt base.
+ *
+ * Extraído da rota (issue #64) por dois motivos. O primeiro é que o pre-warm do
+ * cache, se for implementado, precisa produzir um prefixo byte a byte idêntico ao
+ * da requisição real, e a única forma de garantir isso é chamar a mesma função,
+ * não manter uma cópia do texto. O segundo é que antes este texto era concatenado
+ * dentro de um único `systemPrompt` e depois recortado de volta por offset
+ * (`slice(BASE.length, dynamicContentStart)`): um prefixo cacheado não deveria
+ * depender de aritmética de índices para ser reconstruído.
+ *
+ * Cada leitura fica em seu próprio try/catch, como antes: falhar em carregar as
+ * instruções de um cliente não deve derrubar a resposta, e a categoria só entra
+ * em `injectedCategories` quando a query de fato ocorreu, senão o fallback
+ * deixaria de reenviar documentos que nunca foram injetados.
+ */
+async function buildStaticClientPrompt(effectiveClient: string | null): Promise<{
+  text: string
+  /**
+   * Categorias cujos documentos já entraram no bloco estável. O fallback de RAG
+   * consulta este Set para não reenviar o mesmo conteúdo duplicado.
+   */
+  injectedCategories: Set<string>
+}> {
+  const parts: string[] = []
+  const injectedCategories = new Set<string>()
+
+  // Instruções fixas globais, sempre, independente de cliente.
+  try {
+    const fixedDocs = await prisma.document.findMany({
+      where: { active: true, category: 'instrucoes-fixas' },
+      orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+      select: { name: true, content: true },
+    })
+    injectedCategories.add('instrucoes-fixas')
+    if (fixedDocs.length > 0) {
+      const fixedText = fixedDocs
+        .map(doc => `### ${doc.name}\n\n${doc.content}`)
+        .join('\n\n---\n\n')
+      parts.push(`## Instruções Operacionais Fixas\n\n${fixedText}`)
+    }
+  } catch (err) {
+    console.warn('[chat] Falha ao carregar instruções fixas:', err)
+  }
+
+  // Instruções específicas do cliente efetivo.
+  try {
+    const clientInstructions: Array<{ clientId: string; categories: string[] }> = [
+      { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'] },
+      { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'] },
+      { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'] },
+    ]
+
+    for (const { clientId, categories } of clientInstructions) {
+      if (effectiveClient === clientId) {
+        const clientDocs = await prisma.document.findMany({
+          where: { active: true, category: { in: categories } },
+          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+          select: { name: true, content: true },
+        })
+        categories.forEach(c => injectedCategories.add(c))
+        if (clientDocs.length > 0) {
+          const clientText = clientDocs
+            .map(doc => `### ${doc.name}\n\n${doc.content}`)
+            .join('\n\n---\n\n')
+          parts.push(`## Instruções Operacionais — ${categories[0]}\n\n${clientText}`)
+        } else {
+          parts.push(`> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[chat] Falha ao carregar instruções por cliente:', err)
+  }
+
+  return { text: parts.join('\n\n'), injectedCategories }
+}
+
+/**
+ * Monta os blocos de system na ordem que o cache de prompt exige: do mais estável
+ * para o mais volátil, porque cache de prompt é casamento de prefixo e um bloco
+ * que muda invalida tudo que vem depois dele.
+ *
+ * ORÇAMENTO DE BREAKPOINTS: a API permite no máximo 4 por requisição. O pior caso
+ * aqui usa 3, com base, staticClientText e fallbackText. Sobra 1 de folga; ao
+ * usá-la, confirme que o prefixo até o novo breakpoint é estável entre
+ * requisições, senão o efeito é apenas pagar a sobretaxa de gravação.
+ *
+ * TTL DE 1 h (issue #64): os três blocos estáveis usam `ttl: '1h'` em vez dos
+ * 5 min padrão. O perfil de uso é de ferramenta interna, com poucos operadores
+ * fazendo perguntas pontuais ao longo do dia, e um intervalo maior que 5 min
+ * entre mensagens é o caso comum, não a exceção, tanto que o cliente reseta a
+ * sessão por inatividade nessa mesma ordem de grandeza. Com TTL de 5 min o
+ * prefixo estável era regravado a cada pergunta, a 1,25x na gravação em vez de
+ * 0,10x na leitura. A gravação de 1 h custa 2,00x, o que move o ponto de
+ * equilíbrio de 2 para 3 leituras dentro da janela, folgado em um dia útil.
+ */
+function buildSystemBlocks(input: {
+  /** Instruções fixas mais as do cliente efetivo. Vazio quando não há nenhuma. */
+  staticClientText: string
+  /** Dump de documentos do fallback. Vazio quando o RAG funcionou. */
+  fallbackText: string
+  /** Aviso de escopo, formato Bradesco e trechos de RAG. Muda a cada pergunta. */
+  dynamicText: string
+}): Anthropic.TextBlockParam[] {
+  const blocks: Anthropic.TextBlockParam[] = [
+    {
+      type: 'text',
+      text: BASE_SYSTEM_PROMPT,
+      cache_control: STABLE_CACHE_CONTROL,
+    },
+  ]
+
+  const staticClientText = input.staticClientText.trim()
+  if (staticClientText) {
+    blocks.push({ type: 'text', text: staticClientText, cache_control: STABLE_CACHE_CONTROL })
+  }
+
+  // Dump do fallback: determinístico por (escopo de cliente, docs ativos), então
+  // é cacheado, diferente dos trechos de RAG, que variam por pergunta. Fica antes
+  // do bloco dinâmico para manter o prefixo cacheável estável.
+  const fallbackText = input.fallbackText.trim()
+  if (fallbackText) {
+    blocks.push({ type: 'text', text: fallbackText, cache_control: STABLE_CACHE_CONTROL })
+  }
+
+  // Sem cache_control de propósito: o conteúdo não repete entre requisições, e
+  // marcá-lo cobraria a sobretaxa de gravação sem nunca gerar leitura.
+  const dynamicText = input.dynamicText.trim()
+  if (dynamicText) {
+    blocks.push({ type: 'text', text: dynamicText })
+  }
+
+  return blocks
+}
 
 export async function POST(req: NextRequest) {
   // Verify operator auth
@@ -337,90 +527,38 @@ export async function POST(req: NextRequest) {
     // Trust model: ADMIN IS TRUSTED — only authenticated admins can upload
     // documents.  Operator-submitted content (chat messages) is never injected
     // into the system prompt, only into user-role messages.
-    let systemPrompt = BASE_SYSTEM_PROMPT
+    // Bloco estável do system: instruções fixas mais as do cliente efetivo. Só
+    // muda quando um admin altera os documentos ativos ou o cliente efetivo
+    // muda, então é ele que carrega o cache_control com TTL longo.
+    const { text: staticClientText, injectedCategories } =
+      await buildStaticClientPrompt(effectiveClient)
 
-    // Categorias cujos documentos já foram injetados no bloco estático do
-    // prompt. O fallback de RAG consulta este Set para não reenviar o mesmo
-    // conteúdo duplicado. Populado apenas quando a injeção de fato ocorre
-    // (as queries abaixo estão em try/catch — se falharem, a categoria não é
-    // marcada e o fallback volta a incluir os docs do cliente).
-    const injectedCategories = new Set<string>()
-
-    // Injeta instruções fixas globais — sempre, independente de cliente
-    try {
-      const fixedDocs = await prisma.document.findMany({
-        where: { active: true, category: 'instrucoes-fixas' },
-        orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-        select: { name: true, content: true },
-      })
-      injectedCategories.add('instrucoes-fixas')
-      if (fixedDocs.length > 0) {
-        const fixedText = fixedDocs
-          .map(doc => `### ${doc.name}\n\n${doc.content}`)
-          .join('\n\n---\n\n')
-        systemPrompt += `\n\n## Instruções Operacionais Fixas\n\n${fixedText}`
-      }
-    } catch (err) {
-      console.warn('[chat] Falha ao carregar instruções fixas:', err)
-    }
-
-    // Injeta instruções específicas por cliente com base no cliente efetivo
-    try {
-      const clientInstructions: Array<{ clientId: string; categories: string[]; regex: RegExp }> = [
-        { clientId: 'agibank',  categories: ['instrucoes-agibank', 'agibank'],   regex: /\bagibank\b/i },
-        { clientId: 'bradesco', categories: ['instrucoes-bradesco', 'bradesco'], regex: /\bbradesco\b/i },
-        { clientId: 'cwt',      categories: ['instrucoes-cwt', 'cwt'],           regex: /\bcwt\b/i },
-      ]
-
-      for (const { clientId, categories } of clientInstructions) {
-        if (effectiveClient === clientId) {
-          const clientDocs = await prisma.document.findMany({
-            where: { active: true, category: { in: categories } },
-            orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-            select: { name: true, content: true },
-          })
-          categories.forEach(c => injectedCategories.add(c))
-          if (clientDocs.length > 0) {
-            const clientText = clientDocs
-              .map(doc => `### ${doc.name}\n\n${doc.content}`)
-              .join('\n\n---\n\n')
-            systemPrompt += `\n\n## Instruções Operacionais — ${categories[0]}\n\n${clientText}`
-          } else {
-            systemPrompt += `\n\n> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[chat] Falha ao carregar instruções por cliente:', err)
-    }
-
-    // CACHE BOUNDARY: tudo acima deste ponto (prompt fixo + instruções por
-    // cliente) só muda quando um admin altera os documentos ativos ou o
-    // cliente efetivo muda — é reaproveitado como bloco de cache separado.
-    // O que vem a seguir (aviso de escopo, formato Bradesco condicional e
-    // trechos de RAG) varia por pergunta e por isso NÃO é marcado para cache.
-    // O dump de documentos do fallback, por outro lado, é determinístico por
-    // escopo de cliente e vira um bloco cacheado PRÓPRIO (fallbackText), fora
-    // do systemPrompt — ver montagem dos systemBlocks abaixo.
-    const dynamicContentStart = systemPrompt.length
+    // FRONTEIRA DE CACHE: o que vem daqui para baixo (aviso de escopo, formato
+    // Bradesco condicional e trechos de RAG) varia por pergunta e por isso NÃO é
+    // marcado para cache. Ele é acumulado separado do bloco estável, e não
+    // concatenado num único string para ser recortado por offset depois, porque
+    // um prefixo que precisa ser byte a byte estável não deve depender de
+    // aritmética de índices para ser reconstruído.
+    //
+    // O dump de documentos do fallback é caso à parte: é determinístico por
+    // escopo de cliente e vira um bloco cacheado próprio (fallbackText).
+    const dynamicParts: string[] = []
 
     // Quando o operador menciona um cliente fora do seu escopo, instrui o Claude
-    // a avisar. Fica APÓS a fronteira de cache: o texto varia por mensagem e,
-    // dentro do prefixo cacheado, invalidaria o cache do bloco estático inteiro.
+    // a avisar. Fica depois da fronteira de cache: o texto varia por mensagem e,
+    // dentro do prefixo cacheado, invalidaria o cache do bloco estável inteiro.
     if (clientMismatchNote) {
       const CLIENT_DISPLAY: Record<string, string> = {
         bradesco: 'Bradesco', agibank: 'Agibank', eagle: 'Eagle', zurich: 'Zurich', cwt: 'CWT',
       }
       const mentionedLabel = CLIENT_DISPLAY[clientMismatchNote] ?? clientMismatchNote
       const effectiveLabel = CLIENT_DISPLAY[effectiveClient!] ?? effectiveClient
-      systemPrompt += `\n\n> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`
+      dynamicParts.push(`> **AVISO DE ESCOPO (instrução interna):** O operador mencionou "${mentionedLabel}" na mensagem, mas seu perfil está configurado apenas para "${effectiveLabel}". Inicie sua resposta com a seguinte frase exata, antes de qualquer outra coisa: "Sua pergunta mencionou ${mentionedLabel}, mas seu perfil está configurado para ${effectiveLabel}. Responderei com base nas informações do ${effectiveLabel}." — Após essa linha, continue normalmente com a resposta.`)
     }
 
     // Bradesco: substitui o formato genérico de classificação pelo formato específico
     if (effectiveClient === 'bradesco' && isPetition) {
-      systemPrompt += `
-
-## FORMATO DE CLASSIFICAÇÃO BRADESCO
+      dynamicParts.push(`## FORMATO DE CLASSIFICAÇÃO BRADESCO
 
 Quando o operador enviar uma petição do Bradesco para classificação, IGNORE o formato genérico (CLASSIFICAÇÃO / CADASTRAR / FUNDAMENTO) e responda EXCLUSIVAMENTE neste formato, sem adicionar seções extras ou texto fora dele:
 
@@ -445,13 +583,16 @@ Regras obrigatórias:
 - AUTORES ADICIONAIS: listar todos os autores com nome completo e CPF; se não houver além do principal, indicar explicitamente
 - GESTOR SECUNDÁRIO 4230 (PATRIMÔNIO): incluir obrigatoriamente quando houver imóvel, bem alienado fiduciariamente, leasing ou questão ambiental envolvida diretamente na demanda
 - Se algum código não for encontrado na documentação disponível, escrever: "Código não localizado — escalar para suporte SBK"
-- Não adicionar texto fora dos campos acima
-`
+- Não adicionar texto fora dos campos acima`)
     }
 
     const CONTEXT_CHAR_CAP = 80_000
     let usedFallback = false
     let ragTopScore: number | null = null
+    // Quantos candidatos o índice devolveu antes do corte de relevância. Só vai
+    // para o log: distingue "o índice não trouxe nada dentro do escopo" de "o
+    // índice trouxe, mas nada passou do piso", que pedem correções diferentes.
+    let ragCandidateCount: number | null = null
     // Dump de documentos do fallback: montado fora do systemPrompt para virar
     // um bloco de system próprio com cache_control (o conteúdo é determinístico
     // por escopo de cliente + docs ativos, então o cache é reaproveitado).
@@ -488,48 +629,74 @@ Regras obrigatórias:
         const queryEmbedding = await embedQuery(ragQueryText)
         const vectorLiteral = `[${queryEmbedding.join(',')}]`
 
-        const chunks = await prisma.$queryRawUnsafe<
-          Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
-        >(
-          `SELECT dc.content, dc."documentId",
-                  1 - (dc.embedding <=> $1::vector) as score,
-                  d.category, d.name as "docName"
-           FROM "DocumentChunk" dc
-           JOIN "Document" d ON d.id = dc."documentId"
-           WHERE d.active = true
-           ${clientFilter}
-           AND (dc.embedding <=> $1::vector) < 0.45
-           ORDER BY dc.embedding <=> $1::vector
-           LIMIT 6`,
-          vectorLiteral
-        )
+        // O índice vetorial de DocumentChunk é HNSW (ver a migração
+        // 20260729000003_documentchunk_hnsw_index).
+        //
+        // A transação existe só para carregar o `SET LOCAL hnsw.ef_search`: o
+        // valor vale pela sessão, e o Prisma tira conexões de um pool, então
+        // fora de uma transação não há garantia de que o SET e o SELECT caiam na
+        // mesma conexão. `SET LOCAL` num GUC de namespace desconhecido é aceito
+        // sem erro pelo Postgres, então isto não quebra se a instância estiver
+        // com um pgvector sem HNSW. Nesse caso a migração é que falha, e falha
+        // antes, que é o lugar certo.
+        const candidates = await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${RAG_EF_SEARCH}`)
+          return tx.$queryRawUnsafe<
+            Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
+          >(
+            `SELECT dc.content, dc."documentId",
+                    1 - (dc.embedding <=> $1::vector) as score,
+                    d.category, d.name as "docName"
+             FROM "DocumentChunk" dc
+             JOIN "Document" d ON d.id = dc."documentId"
+             WHERE d.active = true
+             ${clientFilter}
+             AND (dc.embedding <=> $1::vector) < ${RAG_CANDIDATE_MAX_DISTANCE}
+             ORDER BY dc.embedding <=> $1::vector
+             LIMIT ${RAG_CANDIDATE_LIMIT}`,
+            vectorLiteral
+          )
+        })
 
-        if (chunks.length > 0) {
-          const topScore = Number(chunks[0].score)
-          ragTopScore = topScore
-          if (topScore < 0.55) {
-            throw new Error('no_chunks')
-          }
-          const clientHint = chunks
-            .map(c => c.category ?? '')
-            .filter(Boolean)
-            .filter((v, i, arr) => arr.indexOf(v) === i)
-            .join(', ')
+        // Corte final em JS, sobre a lista de candidatos já ordenada por
+        // distância crescente (score decrescente) pelo banco.
+        const scored = candidates.map(c => ({ ...c, score: Number(c.score) }))
+        ragCandidateCount = scored.length
+        // Registrado antes do gate de relevância: numa mensagem que cai no
+        // fallback, saber que o melhor candidato marcou 0,52 e não 0,05 é a
+        // diferença entre ajustar o piso e reescrever a documentação. Não move o
+        // avgRagScore do dashboard, que só faz média sobre mensagens sem fallback.
+        ragTopScore = scored.length > 0 ? scored[0].score : null
 
-          const clientAnchorLine = clientHint
-            ? `\n> **Documentação recuperada de:** ${clientHint}\n`
-            : ''
+        const chunks = scored
+          .filter(c => c.score >= RAG_MIN_SCORE)
+          .slice(0, RAG_CHUNK_LIMIT)
 
-          const contextText = chunks
-            .map((c, i) =>
-              `### Trecho ${i + 1} — ${c.docName} [${c.category}] (relevância: ${(Number(c.score) * 100).toFixed(0)}%)\n\n${c.content}`
-            )
-            .join('\n\n---\n\n')
-
-          systemPrompt += `\n\n## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
-        } else {
-          throw new Error('no_chunks')
+        if (chunks.length === 0) {
+          // Separa as duas causas: sem candidato nenhum aponta para o índice ou
+          // para o filtro de cliente; candidato fraco aponta para o corpus.
+          throw new Error(scored.length === 0 ? 'no_candidates' : 'low_score')
         }
+
+        const clientHint = chunks
+          .map(c => c.category ?? '')
+          .filter(Boolean)
+          .filter((v, i, arr) => arr.indexOf(v) === i)
+          .join(', ')
+
+        const clientAnchorLine = clientHint
+          ? `\n> **Documentação recuperada de:** ${clientHint}\n`
+          : ''
+
+        const contextText = chunks
+          .map((c, i) =>
+            `### Trecho ${i + 1} — ${c.docName} [${c.category}] (relevância: ${(c.score * 100).toFixed(0)}%)\n\n${c.content}`
+          )
+          .join('\n\n---\n\n')
+
+        dynamicParts.push(
+          `## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
+        )
       }
     } catch (ragError: unknown) {
       const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
@@ -537,6 +704,13 @@ Regras obrigatórias:
         reason: ragErrorMsg,
         effectiveClient,
         sessionId: validSessionId,
+        // Candidatos devolvidos pelo índice e o melhor score entre eles. Com
+        // 'no_candidates' e candidateCount 0, suspeite do índice ou do filtro de
+        // cliente; com 'low_score' e um topScore perto de RAG_MIN_SCORE, o piso é
+        // que está apertado; com topScore muito baixo, o corpus não cobre a
+        // pergunta e o fallback está certo.
+        candidateCount: ragCandidateCount,
+        topScore: ragTopScore,
       }))
       usedFallback = true
       try {
@@ -596,6 +770,11 @@ Regras obrigatórias:
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')
     const question = lastUserMsg?.content ?? ''
 
+    // Parâmetros de geração do modo desta requisição. Lidos aqui, fora do
+    // ReadableStream, para que uma falha de leitura de Setting apareça antes de o
+    // stream começar, e não no meio dele. A função nunca lança: cai nos defaults.
+    const tuning = await getChatTuning(isPetition)
+
     const startTime = Date.now()
     const encoder = new TextEncoder()
     let fullResponse = ''
@@ -603,6 +782,10 @@ Regras obrigatórias:
     let outputTokens: number | null = null
     let cacheReadTokens: number | null = null
     let cacheCreationTokens: number | null = null
+    // Recorte de 1 h dentro de cacheCreationTokens. Gravado porque as duas
+    // faixas de TTL têm preços diferentes (2,00x contra 1,25x da entrada) e o
+    // dashboard precisa saber qual aplicar a cada linha. Ver lib/pricing.ts.
+    let cacheCreation1hTokens: number | null = null
     // stop_reason da API ('end_turn', 'max_tokens', ...) ou, quando a requisição
     // não chega ao fim, o marcador local 'timeout' / 'error' gravado no catch.
     let stopReason: string | null = null
@@ -620,54 +803,11 @@ Regras obrigatórias:
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          // ORÇAMENTO DE CACHE BREAKPOINTS: a API permite no máximo 4 por
-          // requisição. O pior caso aqui usa 3 — base(1) + staticClientText(2)
-          // + fallbackText(3). Sobra 1 de folga; ao usá-la, confirme que o
-          // prefixo até o novo breakpoint é estável entre requisições, senão o
-          // efeito é apenas pagar a sobretaxa de gravação (ver a nota do
-          // histórico, mais abaixo).
-          //
-          // Bloco estático por cliente (documentos fixos + instruções do cliente
-          // efetivo): muda raramente, então recebe seu próprio cache_control
-          // para ser reaproveitado entre requisições consecutivas do mesmo cliente.
-          const staticClientText = systemPrompt.slice(BASE_SYSTEM_PROMPT.length, dynamicContentStart).trim()
-          // Bloco dinâmico (aviso de escopo + formato Bradesco condicional +
-          // trechos de RAG): muda a cada pergunta, então NÃO recebe cache_control
-          // — ver nota acima do dynamicContentStart sobre o custo de cachear
-          // conteúdo que não repete.
-          const dynamicText = systemPrompt.slice(dynamicContentStart).trim()
-
-          const systemBlocks: Anthropic.TextBlockParam[] = [
-            {
-              type: 'text',
-              text: BASE_SYSTEM_PROMPT,
-              cache_control: { type: 'ephemeral' },
-            },
-          ]
-          if (staticClientText) {
-            systemBlocks.push({
-              type: 'text',
-              text: staticClientText,
-              cache_control: { type: 'ephemeral' },
-            })
-          }
-          // Dump de documentos do fallback: determinístico por (escopo de
-          // cliente, docs ativos), então é cacheado — diferente dos chunks de
-          // RAG, que variam por pergunta. Fica antes do bloco dinâmico para
-          // manter o prefixo cacheável estável.
-          if (fallbackText) {
-            systemBlocks.push({
-              type: 'text',
-              text: fallbackText,
-              cache_control: { type: 'ephemeral' },
-            })
-          }
-          if (dynamicText) {
-            systemBlocks.push({
-              type: 'text',
-              text: dynamicText,
-            })
-          }
+          const systemBlocks = buildSystemBlocks({
+            staticClientText,
+            fallbackText,
+            dynamicText: dynamicParts.join('\n\n'),
+          })
 
           // O histórico NÃO é marcado para cache. Cache de prompt é casamento de
           // prefixo, e o prefixo até o histórico inclui dynamicText (trechos de
@@ -690,7 +830,21 @@ Regras obrigatórias:
               // a cadastrar o preço correspondente — o dashboard precifica cada
               // mensagem pelo modelo gravado em Message.model.
               model: CHAT_MODEL,
-              max_tokens: MAX_RESPONSE_TOKENS,
+              // Teto de saída por modo, configurável em Setting (issue #65).
+              max_tokens: tuning.maxTokens,
+              // EXPLÍCITO DE PROPÓSITO: este workload não usa extended thinking.
+              // No Sonnet 4.6 omitir o campo já significa desligado, então esta
+              // linha não muda nada hoje. Ela existe porque em modelos mais novos
+              // o default inverte e passa a ligar thinking adaptativo, e como
+              // max_tokens é um teto sobre thinking mais texto de resposta
+              // somados, uma futura troca de modelo sem tocar aqui produziria
+              // resposta truncada no meio, silenciosamente.
+              thinking: { type: 'disabled' },
+              // Roteado por isPetition: classificação de petição é extração
+              // estruturada e precisa de esforço alto, pergunta operacional curta
+              // não. Ver lib/chatTuning.ts para os defaults e o motivo de eles
+              // reproduzirem o comportamento anterior até o harness da #60 existir.
+              output_config: { effort: tuning.effort },
               system: systemBlocks,
               messages: anthropicMessages,
               stream: true,
@@ -703,6 +857,12 @@ Regras obrigatórias:
               inputTokens = event.message.usage.input_tokens
               cacheReadTokens = event.message.usage.cache_read_input_tokens ?? null
               cacheCreationTokens = event.message.usage.cache_creation_input_tokens ?? null
+              // `cache_creation` é a quebra por TTL do mesmo total acima. Vem
+              // nulo quando a requisição não gravou cache; nesse caso o recorte
+              // de 1 h fica nulo também e a linha é precificada como 5 min, que
+              // é o comportamento correto para zero tokens gravados.
+              cacheCreation1hTokens =
+                event.message.usage.cache_creation?.ephemeral_1h_input_tokens ?? null
             } else if (event.type === 'message_delta') {
               outputTokens = event.usage.output_tokens
               stopReason = event.delta.stop_reason ?? stopReason
@@ -725,11 +885,17 @@ Regras obrigatórias:
               isPetition,
               effectiveClient,
               outputTokens,
+              // O teto e o esforço em vigor entram no log porque agora vêm de
+              // configuração: sem eles não há como saber, olhando o log, se o
+              // truncamento veio de um teto apertado no painel ou da resposta
+              // ser genuinamente longa.
+              maxTokens: tuning.maxTokens,
+              effort: tuning.effort,
             }))
             // O aviso vai apenas para o stream, não para Message.answer: o campo
             // guarda a saída do modelo, e o truncamento fica registrado em
             // Message.stopReason.
-            controller.enqueue(encoder.encode(TRUNCATION_NOTICE))
+            controller.enqueue(encoder.encode(truncationNotice(tuning.maxTokens)))
           }
 
           // Log interaction after streaming completes
@@ -747,6 +913,7 @@ Regras obrigatórias:
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
+                cacheCreation1hTokens,
                 detectedClient: analyticsClient,
                 ragFallback: usedFallback,
                 ragTopScore,
@@ -756,8 +923,13 @@ Regras obrigatórias:
               select: { id: true },
             })
             messageLogged = true
-            // Fire-and-forget theme classification — does not block the response
-            classifyAndSaveTheme(saved.id, question).catch(() => {})
+            // Fire-and-forget theme classification — does not block the response.
+            // Pulada para o harness de avaliação: são dezenas de mensagens por
+            // rodada, cada classificação é uma chamada de Haiku, e o tema de um
+            // caso de eval não interessa a ninguém. Ver lib/evalMode.ts.
+            if (!isEvalOperator(operatorName)) {
+              classifyAndSaveTheme(saved.id, question).catch(() => {})
+            }
           } catch {
             // Do not fail the request if logging fails
           }
@@ -793,6 +965,7 @@ Regras obrigatórias:
                   outputTokens,
                   cacheReadTokens,
                   cacheCreationTokens,
+                  cacheCreation1hTokens,
                   detectedClient: analyticsClient,
                   ragFallback: usedFallback,
                   ragTopScore,
