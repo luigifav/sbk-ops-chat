@@ -7,6 +7,8 @@ import { classifyAndSaveTheme } from '@/lib/theme'
 import { recordRagOutcome } from '@/lib/ragHealth'
 import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 import { CHAT_MODEL } from '@/lib/pricing'
+import { getChatTuning } from '@/lib/chatTuning'
+import { isEvalOperator } from '@/lib/evalMode'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +16,16 @@ export const dynamic = 'force-dynamic'
 // Enforced via Redis (lib/ratelimit.ts) when UPSTASH_REDIS_REST_URL/TOKEN are
 // set, so the limit holds across concurrent serverless instances; otherwise
 // falls back to an in-memory counter local to each instance.
-const CHAT_LIMIT = 60
+// Configurável por CHAT_HOURLY_LIMIT, mesmo padrão do teto diário abaixo. O
+// motivo de existir é o harness de avaliação (issue #60): um conjunto de 40 a 60
+// casos estoura 60 mensagens por hora e a rodada morre no meio. A instância que
+// roda o eval sobe o teto por ambiente, sem que nada no código contorne o limite.
+const CHAT_HOURLY_LIMIT_DEFAULT = 60
+const parsedHourlyLimit = Number.parseInt(process.env.CHAT_HOURLY_LIMIT ?? '', 10)
+const CHAT_LIMIT =
+  Number.isFinite(parsedHourlyLimit) && parsedHourlyLimit > 0
+    ? parsedHourlyLimit
+    : CHAT_HOURLY_LIMIT_DEFAULT
 const CHAT_WINDOW = 60 * 60 * 1_000
 
 // Segundo teto, em janela de 24 h, sobre a mesma chave. O limite horário sozinho
@@ -31,18 +42,21 @@ const CHAT_DAILY_WINDOW = 24 * 60 * 60 * 1_000
 // Streaming timeout: abort Claude stream if no response after 60 seconds.
 const STREAM_TIMEOUT_MS = 60_000
 
-// Teto de tokens de saída por resposta. Quando é atingido, a API encerra o
-// stream com stop_reason 'max_tokens' e o texto chega cortado ao operador — o
-// caso é detectado abaixo e sinalizado explicitamente na resposta.
-const MAX_RESPONSE_TOKENS = 2048
-
 // Aviso anexado ao stream quando a resposta é cortada pelo teto de tokens.
 // Uma classificação cortada é pior que nenhuma, porque parece completa.
-const TRUNCATION_NOTICE =
-  '\n\n**Aviso: esta resposta está incompleta.** O limite de tamanho ' +
-  `(${MAX_RESPONSE_TOKENS} tokens de saída) foi atingido e o texto acima foi ` +
-  'cortado no meio. Peça a continuação ou escale para o suporte SBK antes de ' +
-  'usar este conteúdo.'
+//
+// O teto virou parâmetro (issue #65): ele varia por modo e é configurável em
+// Setting, então o aviso precisa citar o valor que de fato limitou a resposta.
+// Um aviso com o número errado é pior que um aviso genérico, porque manda o
+// operador investigar o lugar errado.
+function truncationNotice(maxTokens: number): string {
+  return (
+    '\n\n**Aviso: esta resposta está incompleta.** O limite de tamanho ' +
+    `(${maxTokens} tokens de saída) foi atingido e o texto acima foi ` +
+    'cortado no meio. Peça a continuação ou escale para o suporte SBK antes de ' +
+    'usar este conteúdo.'
+  )
+}
 
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
@@ -756,6 +770,11 @@ Regras obrigatórias:
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')
     const question = lastUserMsg?.content ?? ''
 
+    // Parâmetros de geração do modo desta requisição. Lidos aqui, fora do
+    // ReadableStream, para que uma falha de leitura de Setting apareça antes de o
+    // stream começar, e não no meio dele. A função nunca lança: cai nos defaults.
+    const tuning = await getChatTuning(isPetition)
+
     const startTime = Date.now()
     const encoder = new TextEncoder()
     let fullResponse = ''
@@ -811,7 +830,21 @@ Regras obrigatórias:
               // a cadastrar o preço correspondente — o dashboard precifica cada
               // mensagem pelo modelo gravado em Message.model.
               model: CHAT_MODEL,
-              max_tokens: MAX_RESPONSE_TOKENS,
+              // Teto de saída por modo, configurável em Setting (issue #65).
+              max_tokens: tuning.maxTokens,
+              // EXPLÍCITO DE PROPÓSITO: este workload não usa extended thinking.
+              // No Sonnet 4.6 omitir o campo já significa desligado, então esta
+              // linha não muda nada hoje. Ela existe porque em modelos mais novos
+              // o default inverte e passa a ligar thinking adaptativo, e como
+              // max_tokens é um teto sobre thinking mais texto de resposta
+              // somados, uma futura troca de modelo sem tocar aqui produziria
+              // resposta truncada no meio, silenciosamente.
+              thinking: { type: 'disabled' },
+              // Roteado por isPetition: classificação de petição é extração
+              // estruturada e precisa de esforço alto, pergunta operacional curta
+              // não. Ver lib/chatTuning.ts para os defaults e o motivo de eles
+              // reproduzirem o comportamento anterior até o harness da #60 existir.
+              output_config: { effort: tuning.effort },
               system: systemBlocks,
               messages: anthropicMessages,
               stream: true,
@@ -852,11 +885,17 @@ Regras obrigatórias:
               isPetition,
               effectiveClient,
               outputTokens,
+              // O teto e o esforço em vigor entram no log porque agora vêm de
+              // configuração: sem eles não há como saber, olhando o log, se o
+              // truncamento veio de um teto apertado no painel ou da resposta
+              // ser genuinamente longa.
+              maxTokens: tuning.maxTokens,
+              effort: tuning.effort,
             }))
             // O aviso vai apenas para o stream, não para Message.answer: o campo
             // guarda a saída do modelo, e o truncamento fica registrado em
             // Message.stopReason.
-            controller.enqueue(encoder.encode(TRUNCATION_NOTICE))
+            controller.enqueue(encoder.encode(truncationNotice(tuning.maxTokens)))
           }
 
           // Log interaction after streaming completes
@@ -884,8 +923,13 @@ Regras obrigatórias:
               select: { id: true },
             })
             messageLogged = true
-            // Fire-and-forget theme classification — does not block the response
-            classifyAndSaveTheme(saved.id, question).catch(() => {})
+            // Fire-and-forget theme classification — does not block the response.
+            // Pulada para o harness de avaliação: são dezenas de mensagens por
+            // rodada, cada classificação é uma chamada de Haiku, e o tema de um
+            // caso de eval não interessa a ninguém. Ver lib/evalMode.ts.
+            if (!isEvalOperator(operatorName)) {
+              classifyAndSaveTheme(saved.id, question).catch(() => {})
+            }
           } catch {
             // Do not fail the request if logging fails
           }
