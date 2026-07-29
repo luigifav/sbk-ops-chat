@@ -1,16 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
-import {
-  CHAT_MODEL,
-  LEGACY_MESSAGE_MODEL,
-  costUsd,
-  costWithoutCacheUsd,
-  labelFor,
-  pricingFor,
-  splitCacheCreation,
-  type TokenUsage,
-} from '@/lib/pricing'
+import { CHAT_MODEL, costUsd, labelFor, pricingFor } from '@/lib/pricing'
+import { computeMessageMetrics } from '@/lib/metrics'
 
 export const dynamic = 'force-dynamic'
 
@@ -187,66 +179,25 @@ export async function GET(req: NextRequest) {
   const uniqueOperators = new Set(messages.map((m) => m.operatorName)).size
   const topTheme = themeChartData[0]?.theme ?? '-'
 
-  // Cost data — cada mensagem é precificada pelo modelo que a atendeu
+  // Cost data: cada mensagem é precificada pelo modelo que a atendeu
   // (Message.model), com a tabela de preços em lib/pricing.ts. Mensagens
   // anteriores à coluna `model` caem em LEGACY_MESSAGE_MODEL.
-  let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0
-  // Gravações de cache separadas por TTL: a de 1 h custa 2,00x da entrada, a de
-  // 5 min 1,25x (ver lib/pricing.ts). `totalCacheCreation` continua sendo o
-  // total das duas, para que a linha de tokens do dashboard não mude de
-  // significado.
-  let totalCacheCreation1h = 0
-
-  interface ModelBucket extends TokenUsage {
-    messages: number
-    inputTokens: number
-    outputTokens: number
-    cacheReadTokens: number
-    cacheCreationTokens: number
-    cacheCreation1hTokens: number
-  }
-  const buckets = new Map<string, ModelBucket>()
-
-  for (const m of messages) {
-    totalInput += m.inputTokens ?? 0
-    totalOutput += m.outputTokens ?? 0
-    totalCacheRead += m.cacheReadTokens ?? 0
-    totalCacheCreation += m.cacheCreationTokens ?? 0
-    totalCacheCreation1h += splitCacheCreation(m).tokens1h
-
-    const key = m.model ?? LEGACY_MESSAGE_MODEL
-    let bucket = buckets.get(key)
-    if (!bucket) {
-      bucket = {
-        messages: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        cacheCreation1hTokens: 0,
-      }
-      buckets.set(key, bucket)
-    }
-    bucket.messages += 1
-    bucket.inputTokens += m.inputTokens ?? 0
-    bucket.outputTokens += m.outputTokens ?? 0
-    bucket.cacheReadTokens += m.cacheReadTokens ?? 0
-    bucket.cacheCreationTokens += m.cacheCreationTokens ?? 0
-    // Somado pelo recorte já normalizado da linha, não pela coluna crua: uma
-    // linha inconsistente (recorte de 1 h maior que o total) seria contada aqui
-    // acima do total e faria o balde cobrar mais que o devido.
-    bucket.cacheCreation1hTokens += splitCacheCreation(m).tokens1h
-  }
-
-  let estimatedCostUsd = 0
-  let costWithoutCacheTotalUsd = 0
-  for (const [model, bucket] of buckets) {
-    estimatedCostUsd += costUsd(bucket, model)
-    costWithoutCacheTotalUsd += costWithoutCacheUsd(bucket, model)
-  }
-  const cacheSavingsUsd = costWithoutCacheTotalUsd - estimatedCostUsd
-  const totalInputLike = totalInput + totalCacheRead + totalCacheCreation
-  const cacheHitRate = totalInputLike > 0 ? totalCacheRead / totalInputLike : 0
+  //
+  // As fórmulas vivem em lib/metrics.ts, e não aqui, porque scripts/measure.ts
+  // compara duas janelas de tempo usando exatamente as mesmas contas. Duplicá-las
+  // faria o script e o dashboard divergirem na primeira mudança de preço.
+  const metrics = computeMessageMetrics(messages)
+  const {
+    totalInput,
+    totalOutput,
+    totalCacheRead,
+    totalCacheCreation,
+    totalCacheCreation1h,
+    estimatedCostUsd,
+    cacheSavingsUsd,
+    cacheHitRate,
+    buckets,
+  } = metrics
 
   const modelBreakdown = Array.from(buckets.entries())
     .map(([model, bucket]) => {
@@ -276,37 +227,25 @@ export async function GET(req: NextRequest) {
   const primaryModel = modelBreakdown[0]?.model ?? CHAT_MODEL
   const primaryPrices = pricingFor(primaryModel)
 
-  // Qualidade da resposta: truncamento por max_tokens e requisições que não
-  // chegaram ao fim (timeout do stream ou erro da API). Ver lib/pricing.ts e o
-  // stopReason gravado em app/api/chat/route.ts.
-  const truncatedCount = messages.filter((m) => m.stopReason === 'max_tokens').length
-  const truncationRate = totalMessages > 0 ? truncatedCount / totalMessages : 0
-  const failedCount = messages.filter(
-    (m) => m.stopReason === 'timeout' || m.stopReason === 'error'
-  ).length
+  // Qualidade da resposta (truncamento por max_tokens, requisições que não
+  // chegaram ao fim) e saúde do RAG: calculados em lib/metrics.ts.
+  const { truncatedCount, truncationRate, failedCount, fallbackRate, avgRagScore } = metrics
 
-  // RAG fallback metrics
-  const fallbackMessages = messages.filter((m) => m.ragFallback)
-  const ragMessages = messages.filter((m) => !m.ragFallback && m.ragTopScore != null)
-  const fallbackRate = totalMessages > 0 ? fallbackMessages.length / totalMessages : 0
-  const avgRagScore =
-    ragMessages.length > 0
-      ? ragMessages.reduce((sum, m) => sum + (m.ragTopScore ?? 0), 0) / ragMessages.length
-      : null
-
-  // Estimate cost extra from fallbacks vs. using RAG chunks
-  // Average inputTokens for RAG messages vs fallback messages
+  // O custo extra do fallback precisa das linhas, não só das contagens, porque
+  // compara a média de inputTokens dos dois grupos.
+  const fallbackRows = messages.filter((m) => m.ragFallback)
+  const ragRows = messages.filter((m) => !m.ragFallback && m.ragTopScore != null)
   const avgInputRag =
-    ragMessages.length > 0
-      ? ragMessages.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / ragMessages.length
+    ragRows.length > 0
+      ? ragRows.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / ragRows.length
       : null
   const avgInputFallback =
-    fallbackMessages.length > 0
-      ? fallbackMessages.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / fallbackMessages.length
+    fallbackRows.length > 0
+      ? fallbackRows.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / fallbackRows.length
       : null
   const fallbackCostUsd =
     avgInputRag != null && avgInputFallback != null
-      ? ((avgInputFallback - avgInputRag) / 1_000_000) * primaryPrices.input * fallbackMessages.length
+      ? ((avgInputFallback - avgInputRag) / 1_000_000) * primaryPrices.input * fallbackRows.length
       : null
 
   // Daily cost chart
