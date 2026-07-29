@@ -47,6 +47,37 @@ const TRUNCATION_NOTICE =
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
 
+// AJUSTE DO RAG (issue #61)
+//
+// Quantos trechos entram de fato no prompt.
+const RAG_CHUNK_LIMIT = 6
+// Quantos candidatos a consulta pede ao índice antes do corte. É maior que o
+// limite acima de propósito: `d.active` e o filtro de cliente são avaliados
+// DEPOIS da varredura do índice vetorial, então pedir só 6 ao banco significa
+// que todo candidato descartado pelo filtro sai do resultado sem ser reposto, e
+// a consulta devolve menos de 6, ou até zero, mesmo havendo trechos relevantes
+// daquele cliente no corpus. Candidato sobrando é barato: o corte acontece antes
+// de montar o prompt, então nada disso é cobrado em tokens de entrada.
+const RAG_CANDIDATE_LIMIT = 30
+// `hnsw.ef_search` da consulta. O padrão do pgvector é 40, e ele é o teto de
+// candidatos que a varredura do índice devolve: antes do JOIN, portanto antes do
+// filtro de cliente. Medido em corpus sintético de 2.400 chunks com o filtro de
+// cliente de produção: com ef_search 40 e LIMIT 30, a consulta trazia 21,7 linhas
+// em média em vez de 30, porque o índice esgotava os 40 candidatos e o filtro
+// descartava parte deles. Com 120 as 30 vêm completas. Ou seja, sem subir este
+// valor o over-fetch acima é decorativo: pedir mais candidatos não adianta se o
+// índice não os oferece.
+const RAG_EF_SEARCH = 120
+// Piso de similaridade (1 - distância cosseno) para um trecho ser usado. Abaixo
+// dele a documentação recuperada não sustenta a resposta e o fallback é preferível.
+const RAG_MIN_SCORE = 0.55
+// Teto de distância aplicado no SQL. Mais frouxo que RAG_MIN_SCORE de propósito:
+// aqui ele serve só para limitar o volume trazido do banco, enquanto o piso de
+// relevância de verdade é aplicado em JS. A folga entre os dois deixa os
+// candidatos que passaram perto visíveis no log de fallback, que é o diagnóstico
+// de quem tenta separar "índice não achou" de "o corpus não tem a resposta".
+const RAG_CANDIDATE_MAX_DISTANCE = 0.6
+
 // cache_control dos blocos estáveis do system, declarado uma única vez para que
 // os três breakpoints não divirjam de TTL com o tempo. O motivo de 1 h está na
 // nota de ORÇAMENTO DE CACHE BREAKPOINTS, na montagem dos systemBlocks.
@@ -460,6 +491,10 @@ Regras obrigatórias:
     const CONTEXT_CHAR_CAP = 80_000
     let usedFallback = false
     let ragTopScore: number | null = null
+    // Quantos candidatos o índice devolveu antes do corte de relevância. Só vai
+    // para o log: distingue "o índice não trouxe nada dentro do escopo" de "o
+    // índice trouxe, mas nada passou do piso", que pedem correções diferentes.
+    let ragCandidateCount: number | null = null
     // Dump de documentos do fallback: montado fora do systemPrompt para virar
     // um bloco de system próprio com cache_control (o conteúdo é determinístico
     // por escopo de cliente + docs ativos, então o cache é reaproveitado).
@@ -496,48 +531,72 @@ Regras obrigatórias:
         const queryEmbedding = await embedQuery(ragQueryText)
         const vectorLiteral = `[${queryEmbedding.join(',')}]`
 
-        const chunks = await prisma.$queryRawUnsafe<
-          Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
-        >(
-          `SELECT dc.content, dc."documentId",
-                  1 - (dc.embedding <=> $1::vector) as score,
-                  d.category, d.name as "docName"
-           FROM "DocumentChunk" dc
-           JOIN "Document" d ON d.id = dc."documentId"
-           WHERE d.active = true
-           ${clientFilter}
-           AND (dc.embedding <=> $1::vector) < 0.45
-           ORDER BY dc.embedding <=> $1::vector
-           LIMIT 6`,
-          vectorLiteral
-        )
+        // O índice vetorial de DocumentChunk é HNSW (ver a migração
+        // 20260729000003_documentchunk_hnsw_index).
+        //
+        // A transação existe só para carregar o `SET LOCAL hnsw.ef_search`: o
+        // valor vale pela sessão, e o Prisma tira conexões de um pool, então
+        // fora de uma transação não há garantia de que o SET e o SELECT caiam na
+        // mesma conexão. `SET LOCAL` num GUC de namespace desconhecido é aceito
+        // sem erro pelo Postgres, então isto não quebra se a instância estiver
+        // com um pgvector sem HNSW. Nesse caso a migração é que falha, e falha
+        // antes, que é o lugar certo.
+        const candidates = await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${RAG_EF_SEARCH}`)
+          return tx.$queryRawUnsafe<
+            Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
+          >(
+            `SELECT dc.content, dc."documentId",
+                    1 - (dc.embedding <=> $1::vector) as score,
+                    d.category, d.name as "docName"
+             FROM "DocumentChunk" dc
+             JOIN "Document" d ON d.id = dc."documentId"
+             WHERE d.active = true
+             ${clientFilter}
+             AND (dc.embedding <=> $1::vector) < ${RAG_CANDIDATE_MAX_DISTANCE}
+             ORDER BY dc.embedding <=> $1::vector
+             LIMIT ${RAG_CANDIDATE_LIMIT}`,
+            vectorLiteral
+          )
+        })
 
-        if (chunks.length > 0) {
-          const topScore = Number(chunks[0].score)
-          ragTopScore = topScore
-          if (topScore < 0.55) {
-            throw new Error('no_chunks')
-          }
-          const clientHint = chunks
-            .map(c => c.category ?? '')
-            .filter(Boolean)
-            .filter((v, i, arr) => arr.indexOf(v) === i)
-            .join(', ')
+        // Corte final em JS, sobre a lista de candidatos já ordenada por
+        // distância crescente (score decrescente) pelo banco.
+        const scored = candidates.map(c => ({ ...c, score: Number(c.score) }))
+        ragCandidateCount = scored.length
+        // Registrado antes do gate de relevância: numa mensagem que cai no
+        // fallback, saber que o melhor candidato marcou 0,52 e não 0,05 é a
+        // diferença entre ajustar o piso e reescrever a documentação. Não move o
+        // avgRagScore do dashboard, que só faz média sobre mensagens sem fallback.
+        ragTopScore = scored.length > 0 ? scored[0].score : null
 
-          const clientAnchorLine = clientHint
-            ? `\n> **Documentação recuperada de:** ${clientHint}\n`
-            : ''
+        const chunks = scored
+          .filter(c => c.score >= RAG_MIN_SCORE)
+          .slice(0, RAG_CHUNK_LIMIT)
 
-          const contextText = chunks
-            .map((c, i) =>
-              `### Trecho ${i + 1} — ${c.docName} [${c.category}] (relevância: ${(Number(c.score) * 100).toFixed(0)}%)\n\n${c.content}`
-            )
-            .join('\n\n---\n\n')
-
-          systemPrompt += `\n\n## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
-        } else {
-          throw new Error('no_chunks')
+        if (chunks.length === 0) {
+          // Separa as duas causas: sem candidato nenhum aponta para o índice ou
+          // para o filtro de cliente; candidato fraco aponta para o corpus.
+          throw new Error(scored.length === 0 ? 'no_candidates' : 'low_score')
         }
+
+        const clientHint = chunks
+          .map(c => c.category ?? '')
+          .filter(Boolean)
+          .filter((v, i, arr) => arr.indexOf(v) === i)
+          .join(', ')
+
+        const clientAnchorLine = clientHint
+          ? `\n> **Documentação recuperada de:** ${clientHint}\n`
+          : ''
+
+        const contextText = chunks
+          .map((c, i) =>
+            `### Trecho ${i + 1} — ${c.docName} [${c.category}] (relevância: ${(c.score * 100).toFixed(0)}%)\n\n${c.content}`
+          )
+          .join('\n\n---\n\n')
+
+        systemPrompt += `\n\n## Trechos relevantes da documentação${clientAnchorLine}\n\n${contextText}`
       }
     } catch (ragError: unknown) {
       const ragErrorMsg = ragError instanceof Error ? ragError.message : String(ragError)
@@ -545,6 +604,13 @@ Regras obrigatórias:
         reason: ragErrorMsg,
         effectiveClient,
         sessionId: validSessionId,
+        // Candidatos devolvidos pelo índice e o melhor score entre eles. Com
+        // 'no_candidates' e candidateCount 0, suspeite do índice ou do filtro de
+        // cliente; com 'low_score' e um topScore perto de RAG_MIN_SCORE, o piso é
+        // que está apertado; com topScore muito baixo, o corpus não cobre a
+        // pergunta e o fallback está certo.
+        candidateCount: ragCandidateCount,
+        topScore: ragTopScore,
       }))
       usedFallback = true
       try {
@@ -613,7 +679,7 @@ Regras obrigatórias:
     let cacheCreationTokens: number | null = null
     // Recorte de 1 h dentro de cacheCreationTokens. Gravado porque as duas
     // faixas de TTL têm preços diferentes (2,00x contra 1,25x da entrada) e o
-    // dashboard precisa saber qual aplicar a cada linha — ver lib/pricing.ts.
+    // dashboard precisa saber qual aplicar a cada linha. Ver lib/pricing.ts.
     let cacheCreation1hTokens: number | null = null
     // stop_reason da API ('end_turn', 'max_tokens', ...) ou, quando a requisição
     // não chega ao fim, o marcador local 'timeout' / 'error' gravado no catch.
@@ -640,14 +706,14 @@ Regras obrigatórias:
           // histórico, mais abaixo).
           //
           // TTL DE 1 h (issue #64): os três blocos abaixo usam `ttl: '1h'` em
-          // vez dos 5 min padrão. O perfil de uso é de ferramenta interna —
-          // poucos operadores, perguntas pontuais ao longo do dia — e um
+          // vez dos 5 min padrão. O perfil de uso é de ferramenta interna:
+          // poucos operadores, perguntas pontuais ao longo do dia, e um
           // intervalo maior que 5 min entre mensagens é o caso comum, não a
           // exceção, tanto que o cliente reseta a sessão por inatividade nessa
           // mesma ordem de grandeza. Com TTL de 5 min o prefixo estático era
           // regravado a cada pergunta: a 1,25x na gravação em vez de 0,10x na
           // leitura. A gravação de 1 h custa 2,00x, o que move o ponto de
-          // equilíbrio de 2 para 3 leituras dentro da janela — em uma hora de
+          // equilíbrio de 2 para 3 leituras dentro da janela. Em uma hora de
           // dia útil isso é folgado. O TTL só vale para blocos estáveis por
           // definição; o bloco dinâmico abaixo (trechos de RAG) segue sem
           // cache_control nenhum.

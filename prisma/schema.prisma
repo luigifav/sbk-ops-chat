@@ -59,6 +59,12 @@ model Document {
   embeddingStatus String          @default("pending")
   category        String          @default("geral")
   chunks          DocumentChunk[]
+
+  // Filtro das três leituras de Document que toda requisição de chat faz:
+  // instruções fixas, instruções do cliente efetivo e o dump do fallback.
+  // Declarado aqui, e não só no SQL da migração, para que o schema e o banco não
+  // fiquem em drift e um `migrate dev` futuro não proponha derrubar o índice.
+  @@index([active, category])
 }
 
 model DocumentChunk {
