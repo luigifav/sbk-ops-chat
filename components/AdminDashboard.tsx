@@ -111,8 +111,11 @@ interface CostData {
   fallbackRate: number
   avgRagScore: number | null
   fallbackCostUsd: number | null
-  // Opcional para tolerar uma resposta antiga em cache do navegador.
+  // Opcionais para tolerar uma resposta antiga em cache do navegador.
   modelBreakdown?: ModelBreakdownEntry[]
+  truncatedCount?: number
+  truncationRate?: number
+  failedCount?: number
 }
 
 interface CostPerMessageData {
@@ -426,7 +429,7 @@ function AnalyticsPanel() {
             ))}
           </div>
 
-          {/* RAG health KPIs */}
+          {/* RAG health e qualidade da resposta */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             {[
               {
@@ -446,6 +449,21 @@ function AnalyticsPanel() {
                 value: costData.fallbackCostUsd != null ? `$${costData.fallbackCostUsd.toFixed(4)}` : '-',
                 sub: 'estimado vs. usar RAG',
                 alert: false,
+              },
+              {
+                label: 'Respostas truncadas',
+                value:
+                  costData.truncationRate != null
+                    ? `${(costData.truncationRate * 100).toFixed(1)}%`
+                    : '-',
+                sub: `${costData.truncatedCount ?? 0} cortadas em max_tokens`,
+                alert: (costData.truncationRate ?? 0) > 0.02,
+              },
+              {
+                label: 'Requisições interrompidas',
+                value: (costData.failedCount ?? 0).toLocaleString('pt-BR'),
+                sub: 'timeout do stream ou erro da API',
+                alert: (costData.failedCount ?? 0) > 0,
               },
             ].map((card) => (
               <div

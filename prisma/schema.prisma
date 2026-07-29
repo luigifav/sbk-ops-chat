@@ -29,6 +29,11 @@ model Message {
   // coluna existir — o dashboard as precifica com LEGACY_MESSAGE_MODEL
   // (ver lib/pricing.ts).
   model                String?
+  // Motivo de parada. Valores da API ('end_turn', 'max_tokens',
+  // 'stop_sequence', ...) mais dois marcadores locais gravados quando a
+  // requisição não chega ao fim: 'timeout' (abort por STREAM_TIMEOUT_MS) e
+  // 'error'. Nulo nas linhas anteriores a esta coluna.
+  stopReason           String?
 }
 
 model Setting {

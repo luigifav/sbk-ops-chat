@@ -20,6 +20,19 @@ const CHAT_WINDOW = 60 * 60 * 1_000
 // Streaming timeout: abort Claude stream if no response after 60 seconds.
 const STREAM_TIMEOUT_MS = 60_000
 
+// Teto de tokens de saída por resposta. Quando é atingido, a API encerra o
+// stream com stop_reason 'max_tokens' e o texto chega cortado ao operador — o
+// caso é detectado abaixo e sinalizado explicitamente na resposta.
+const MAX_RESPONSE_TOKENS = 2048
+
+// Aviso anexado ao stream quando a resposta é cortada pelo teto de tokens.
+// Uma classificação cortada é pior que nenhuma, porque parece completa.
+const TRUNCATION_NOTICE =
+  '\n\n**Aviso: esta resposta está incompleta.** O limite de tamanho ' +
+  `(${MAX_RESPONSE_TOKENS} tokens de saída) foi atingido e o texto acima foi ` +
+  'cortado no meio. Peça a continuação ou escale para o suporte SBK antes de ' +
+  'usar este conteúdo.'
+
 // Session ID validation: UUID or alphanumeric, max 64 chars.
 const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]{1,64}$/
 
@@ -551,6 +564,12 @@ Regras obrigatórias:
     let outputTokens: number | null = null
     let cacheReadTokens: number | null = null
     let cacheCreationTokens: number | null = null
+    // stop_reason da API ('end_turn', 'max_tokens', ...) ou, quando a requisição
+    // não chega ao fim, o marcador local 'timeout' / 'error' gravado no catch.
+    let stopReason: string | null = null
+    // Evita gravar duas linhas em Message caso algo falhe depois da gravação
+    // do caminho de sucesso.
+    let messageLogged = false
 
     // AbortController enforces a hard timeout on the Anthropic stream.
     // If the API stalls, the stream is aborted after STREAM_TIMEOUT_MS.
@@ -632,7 +651,7 @@ Regras obrigatórias:
               // a cadastrar o preço correspondente — o dashboard precifica cada
               // mensagem pelo modelo gravado em Message.model.
               model: CHAT_MODEL,
-              max_tokens: 2048,
+              max_tokens: MAX_RESPONSE_TOKENS,
               system: systemBlocks,
               messages: anthropicMessages,
               stream: true,
@@ -647,6 +666,7 @@ Regras obrigatórias:
               cacheCreationTokens = event.message.usage.cache_creation_input_tokens ?? null
             } else if (event.type === 'message_delta') {
               outputTokens = event.usage.output_tokens
+              stopReason = event.delta.stop_reason ?? stopReason
             } else if (
               event.type === 'content_block_delta' &&
               event.delta.type === 'text_delta'
@@ -655,6 +675,22 @@ Regras obrigatórias:
               fullResponse += text
               controller.enqueue(encoder.encode(text))
             }
+          }
+
+          // Resposta cortada pelo teto de tokens: sinaliza ao operador e
+          // registra no log. O caso mais provável é a classificação de petição,
+          // que é longa e é justamente onde um corte silencioso engana mais.
+          if (stopReason === 'max_tokens') {
+            console.warn('[chat] resposta truncada em max_tokens:', JSON.stringify({
+              sessionId: validSessionId,
+              isPetition,
+              effectiveClient,
+              outputTokens,
+            }))
+            // O aviso vai apenas para o stream, não para Message.answer: o campo
+            // guarda a saída do modelo, e o truncamento fica registrado em
+            // Message.stopReason.
+            controller.enqueue(encoder.encode(TRUNCATION_NOTICE))
           }
 
           // Log interaction after streaming completes
@@ -676,9 +712,11 @@ Regras obrigatórias:
                 ragFallback: usedFallback,
                 ragTopScore,
                 model: CHAT_MODEL,
+                stopReason,
               },
               select: { id: true },
             })
+            messageLogged = true
             // Fire-and-forget theme classification — does not block the response
             classifyAndSaveTheme(saved.id, question).catch(() => {})
           } catch {
@@ -687,6 +725,48 @@ Regras obrigatórias:
 
           controller.close()
         } catch (error) {
+          // Requisição que não chegou ao fim (timeout do abortController ou erro
+          // da API). Antes isso não deixava nenhum registro em Message, então o
+          // evento desaparecia dos dados e não havia como saber com que
+          // frequência ocorria. Grava o texto parcial com um marcador de falha.
+          const aborted = abortController.signal.aborted
+          console.warn('[chat] stream interrompido:', JSON.stringify({
+            sessionId: validSessionId,
+            reason: aborted ? 'timeout' : 'error',
+            isPetition,
+            effectiveClient,
+            outputTokens,
+            partialChars: fullResponse.length,
+            message: error instanceof Error ? error.message : String(error),
+          }))
+
+          if (!messageLogged) {
+            try {
+              await prisma.message.create({
+                data: {
+                  ...(messageId ? { id: messageId } : {}),
+                  question,
+                  answer: fullResponse,
+                  sessionId: validSessionId,
+                  responseTimeMs: Date.now() - startTime,
+                  operatorName,
+                  inputTokens,
+                  outputTokens,
+                  cacheReadTokens,
+                  cacheCreationTokens,
+                  detectedClient: analyticsClient,
+                  ragFallback: usedFallback,
+                  ragTopScore,
+                  model: CHAT_MODEL,
+                  stopReason: aborted ? 'timeout' : 'error',
+                },
+                select: { id: true },
+              })
+            } catch {
+              // Nunca falhar a requisição por causa da gravação de diagnóstico
+            }
+          }
+
           controller.error(error)
         } finally {
           clearTimeout(timeoutId)

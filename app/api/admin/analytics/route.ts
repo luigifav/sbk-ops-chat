@@ -75,6 +75,7 @@ export async function GET(req: NextRequest) {
       ragFallback: true,
       ragTopScore: true,
       model: true,
+      stopReason: true,
     },
   })
 
@@ -264,6 +265,15 @@ export async function GET(req: NextRequest) {
   const primaryModel = modelBreakdown[0]?.model ?? CHAT_MODEL
   const primaryPrices = pricingFor(primaryModel)
 
+  // Qualidade da resposta: truncamento por max_tokens e requisições que não
+  // chegaram ao fim (timeout do stream ou erro da API). Ver lib/pricing.ts e o
+  // stopReason gravado em app/api/chat/route.ts.
+  const truncatedCount = messages.filter((m) => m.stopReason === 'max_tokens').length
+  const truncationRate = totalMessages > 0 ? truncatedCount / totalMessages : 0
+  const failedCount = messages.filter(
+    (m) => m.stopReason === 'timeout' || m.stopReason === 'error'
+  ).length
+
   // RAG fallback metrics
   const fallbackMessages = messages.filter((m) => m.ragFallback)
   const ragMessages = messages.filter((m) => !m.ragFallback && m.ragTopScore != null)
@@ -317,6 +327,9 @@ export async function GET(req: NextRequest) {
     avgRagScore,
     fallbackCostUsd,
     modelBreakdown,
+    truncatedCount,
+    truncationRate,
+    failedCount,
   }
 
   // Cost per message — hoje vs. ontem (independente do período selecionado)
