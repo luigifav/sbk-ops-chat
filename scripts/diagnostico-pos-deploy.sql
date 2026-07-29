@@ -58,6 +58,18 @@ ORDER BY tablename, indexname;
 --
 -- Usa o embedding de um chunk existente como vetor de consulta: ele está na mesma
 -- distribuição de uma pergunta real e evita ter que chamar a Voyage.
+--
+-- RODE ISTO PRIMEIRO, uma vez, logo após aplicar a migração:
+--
+--     ANALYZE "DocumentChunk";
+--     ANALYZE "Document";
+--
+-- O índice HNSW acabou de ser criado e as estatísticas da tabela podem estar
+-- velhas. A escolha entre índice e varredura sequencial é decisão de custo do
+-- planner, e ele decide com base nessas estatísticas: sem ANALYZE, o veredicto
+-- desta seção pode ser diferente do que vai valer meia hora depois, quando o
+-- autovacuum passar. Não coloquei o ANALYZE dentro do script porque ele escreve,
+-- e o resto daqui é só leitura.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION pg_temp.diagnostico_indice()
 RETURNS TABLE (resultado text) AS $fn$
@@ -161,24 +173,42 @@ SELECT * FROM pg_temp.diagnostico_indice();
 -- por mensagem e têm createdAt, então o baseline não precisava ter sido coletado
 -- na época.
 -- ============================================================================
--- Confirma quais janelas serão comparadas e quanto dado existe em cada uma. Se as
--- duas vierem vazias, a data do deploy está errada, não há bug no resto.
+-- Confirma quais janelas serão comparadas, quanto dado existe em cada uma, e se a
+-- comparação já é válida. LEIA ESTA SAÍDA ANTES da tabela de métricas: ela diz se
+-- os números abaixo significam algo ou se ainda falta tráfego.
+--
+-- Use a HORA do deploy, não só a data. Se você deployou às 14h e colocar 00:00,
+-- as horas entre 00h e 14h de hoje entram na janela "antes" sendo tráfego já
+-- pós-deploy, e a comparação fica contaminada nas duas pontas.
 WITH params AS (
   SELECT '2026-07-30 00:00:00'::timestamp AS deploy, 7 AS dias   -- <<< EDITE AQUI
+),
+j AS (
+  SELECT 'antes'  AS janela, deploy - (dias || ' days')::interval AS inicio, deploy AS fim FROM params
+  UNION ALL
+  SELECT 'depois' AS janela, deploy AS inicio, deploy + (dias || ' days')::interval AS fim FROM params
+),
+c AS (
+  SELECT j.janela, j.inicio, j.fim,
+    (SELECT count(*) FROM "Message" m
+      WHERE m."createdAt" >= j.inicio AND m."createdAt" < j.fim
+        AND coalesce(m."operatorName", '') <> '__eval__') AS mensagens
+  FROM j
 )
 SELECT
-  'antes'  AS janela, (deploy - (dias || ' days')::interval) AS inicio, deploy AS fim,
-  (SELECT count(*) FROM "Message" m
-    WHERE m."createdAt" >= deploy - (dias || ' days')::interval AND m."createdAt" < deploy
-      AND coalesce(m."operatorName", '') <> '__eval__') AS mensagens
-FROM params
-UNION ALL
-SELECT
-  'depois', deploy, (deploy + (dias || ' days')::interval),
-  (SELECT count(*) FROM "Message" m
-    WHERE m."createdAt" >= deploy AND m."createdAt" < deploy + (dias || ' days')::interval
-      AND coalesce(m."operatorName", '') <> '__eval__')
-FROM params;
+  janela, inicio, fim, mensagens,
+  CASE
+    WHEN mensagens = 0 AND fim <= now()
+      THEN 'ZERO mensagens numa janela ja fechada: a data do deploy esta errada'
+    WHEN fim > now()
+      THEN format('janela AINDA ABERTA, faltam %s. A secao 3 sai parcial: %s mensagens ate agora.',
+                  justify_interval(date_trunc('minute', fim - now())), mensagens)
+    WHEN mensagens < 30
+      THEN format('amostra pequena (%s mensagens): variacao percentual e mais ruido que sinal', mensagens)
+    ELSE format('ok, %s mensagens', mensagens)
+  END AS leitura
+FROM c
+ORDER BY janela;
 
 WITH params AS (
   SELECT
@@ -356,18 +386,35 @@ ORDER BY taxa_pct DESC;
 -- aplicado, ou a API não está devolvendo a quebra por TTL. Nesse caso o custo do
 -- dashboard está subestimado, porque toda gravação seria cobrada a 1,25x.
 -- ============================================================================
+-- A janela começa NO DEPLOY, e não "nos últimos 2 dias". Com um recorte de 2 dias
+-- logo após o deploy, as mensagens de antes (que gravaram cache a 5 min, com a
+-- coluna nula por não existir ainda) entram na conta e o veredicto acusa
+-- "PROBLEMA" num deploy que está perfeito. Falso alarme que manda depurar o que
+-- está certo.
+WITH params AS (
+  SELECT '2026-07-30 00:00:00'::timestamp AS deploy   -- <<< EDITE AQUI (mesma data das outras)
+),
+pos AS (
+  SELECT m.*
+  FROM "Message" m, params p
+  WHERE m."createdAt" >= p.deploy
+    AND coalesce(m."operatorName", '') <> '__eval__'
+)
 SELECT
-  count(*)                                                              AS mensagens_recentes,
-  count("cacheCreation1hTokens")                                        AS com_coluna_preenchida,
-  count(*) FILTER (WHERE coalesce("cacheCreation1hTokens", 0) > 0)       AS com_recorte_1h,
-  count(*) FILTER (WHERE coalesce("cacheCreationTokens", 0) > 0)         AS com_gravacao_de_cache,
+  count(*)                                                        AS mensagens_desde_o_deploy,
+  count(*) FILTER (WHERE coalesce("cacheCreationTokens", 0) > 0)   AS com_gravacao_de_cache,
+  count(*) FILTER (WHERE coalesce("cacheCreation1hTokens", 0) > 0) AS com_recorte_1h,
+  count(*) FILTER (WHERE coalesce("cacheReadTokens", 0) > 0)       AS com_leitura_de_cache,
   CASE
+    WHEN count(*) = 0
+      THEN 'nenhuma mensagem desde o deploy: mande algumas perguntas pelo chat e rode de novo'
     WHEN count(*) FILTER (WHERE coalesce("cacheCreationTokens", 0) > 0) = 0
-      THEN 'nenhuma gravacao de cache na amostra: ou o cache esta sempre quente (otimo), ou o prefixo caiu abaixo do minimo cacheavel'
+         AND count(*) FILTER (WHERE coalesce("cacheReadTokens", 0) > 0) > 0
+      THEN 'OK: so houve LEITURA de cache, nenhuma gravacao. E o melhor cenario, o prefixo ja estava quente.'
+    WHEN count(*) FILTER (WHERE coalesce("cacheCreationTokens", 0) > 0) = 0
+      THEN 'ATENCAO: nem gravacao nem leitura de cache. O prefixo pode ter caido abaixo do minimo cacheavel de 1024 tokens.'
     WHEN count(*) FILTER (WHERE coalesce("cacheCreation1hTokens", 0) > 0) = 0
-      THEN 'PROBLEMA: houve gravacao de cache mas nenhuma marcada como 1 h. Confira se o deploy subiu.'
-    ELSE 'OK: gravacoes de 1 h estao sendo registradas e precificadas a 2,00x'
-  END                                                                   AS leitura
-FROM "Message"
-WHERE "createdAt" >= now() - interval '2 days'
-  AND coalesce("operatorName", '') <> '__eval__';
+      THEN 'PROBLEMA: houve gravacao de cache e nenhuma marcada como 1 h. O deploy do TTL nao subiu, ou a API nao devolveu a quebra por TTL. O custo do dashboard esta subestimado.'
+    ELSE 'OK: gravacoes de 1 h registradas e precificadas a 2,00x'
+  END                                                             AS leitura
+FROM pos;
