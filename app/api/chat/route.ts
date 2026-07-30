@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
@@ -639,12 +640,22 @@ Regras obrigatórias:
         // sem erro pelo Postgres, então isto não quebra se a instância estiver
         // com um pgvector sem HNSW. Nesse caso a migração é que falha, e falha
         // antes, que é o lugar certo.
+        // A consulta de candidatos NÃO traz `dc.content`, só o id e o que o
+        // ranqueamento precisa. O motivo é transferência de dados do banco, que é
+        // recurso cobrado e limitado à parte dos tokens: com
+        // RAG_CANDIDATE_LIMIT = 30 e chunks de 1.000 caracteres (o padrão de
+        // lib/chunking.ts), trazer o texto de todo candidato movia cerca de 30 KB
+        // por mensagem para usar no máximo 6 KB deles. O corte por
+        // RAG_MIN_SCORE e RAG_CHUNK_LIMIT acontece em JS, depois, então o
+        // over-fetch de candidatos que a issue #61 pede para o recall não precisa
+        // arrastar o texto junto: só os sobreviventes têm o conteúdo buscado, em
+        // uma segunda consulta por chave primária.
         const candidates = await prisma.$transaction(async (tx) => {
           await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${RAG_EF_SEARCH}`)
           return tx.$queryRawUnsafe<
-            Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
+            Array<{ id: string; documentId: string; score: unknown; category: string; docName: string }>
           >(
-            `SELECT dc.content, dc."documentId",
+            `SELECT dc.id, dc."documentId",
                     1 - (dc.embedding <=> $1::vector) as score,
                     d.category, d.name as "docName"
              FROM "DocumentChunk" dc
@@ -668,14 +679,36 @@ Regras obrigatórias:
         // avgRagScore do dashboard, que só faz média sobre mensagens sem fallback.
         ragTopScore = scored.length > 0 ? scored[0].score : null
 
-        const chunks = scored
+        const ranked = scored
           .filter(c => c.score >= RAG_MIN_SCORE)
           .slice(0, RAG_CHUNK_LIMIT)
 
-        if (chunks.length === 0) {
+        if (ranked.length === 0) {
           // Separa as duas causas: sem candidato nenhum aponta para o índice ou
           // para o filtro de cliente; candidato fraco aponta para o corpus.
           throw new Error(scored.length === 0 ? 'no_candidates' : 'low_score')
+        }
+
+        // Segunda consulta, por chave primária, só para os trechos que de fato
+        // entram no prompt. Um chunk pode ter desaparecido entre as duas
+        // consultas se o documento foi apagado ou reembedado no meio da
+        // requisição: nesse caso ele sai da lista, e se não sobrar nenhum a
+        // mensagem segue para o fallback como se o índice não tivesse achado nada.
+        const contentById = new Map(
+          (
+            await prisma.documentChunk.findMany({
+              where: { id: { in: ranked.map(c => c.id) } },
+              select: { id: true, content: true },
+            })
+          ).map(row => [row.id, row.content])
+        )
+
+        const chunks = ranked
+          .map(c => ({ ...c, content: contentById.get(c.id) }))
+          .filter((c): c is typeof c & { content: string } => c.content !== undefined)
+
+        if (chunks.length === 0) {
+          throw new Error('no_candidates')
         }
 
         const clientHint = chunks
@@ -718,44 +751,84 @@ Regras obrigatórias:
         // pesquisaria) e exclui categorias já injetadas no bloco estático do
         // prompt — para o agibank/bradesco/cwt os docs do cliente já estão lá,
         // então reenviá-los aqui seria conteúdo 100% duplicado.
-        const documents = await prisma.document.findMany({
-          where: {
-            active: true,
-            category: fallbackCategories
-              ? { in: fallbackCategories.filter(c => !injectedCategories.has(c)) }
-              : { notIn: [...injectedCategories] },
-          },
-          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-          select: { name: true, content: true, category: true },
-        })
+        // Este bloco lê em duas etapas: primeiro tamanho, depois texto. O cap de
+        // CONTEXT_CHAR_CAP sempre existiu, mas era aplicado em JS depois de o
+        // `findMany` ter trazido o corpus inteiro do banco: ele limitava o prompt e
+        // não limitava um byte da transferência. Num fallback sobre um corpus de
+        // alguns MB, cada mensagem arrastava o corpus todo para montar 80 KB de
+        // contexto, e transferência é recurso cobrado e limitado à parte dos tokens.
+        // Escolhendo pelos tamanhos, a transferência passa a ser da ordem do cap.
+        const scopedCategories = fallbackCategories
+          ? fallbackCategories.filter(c => !injectedCategories.has(c))
+          : null
+        const excludedCategories = [...injectedCategories]
 
-        if (documents.length > 0) {
+        // `IN ()` e `NOT IN ()` são SQL inválido, então a lista vazia é decidida
+        // aqui: escopo vazio não casa com documento nenhum, e nada a excluir
+        // significa considerar todos.
+        const documentSizes =
+          scopedCategories?.length === 0
+            ? []
+            : await prisma.$queryRaw<
+                Array<{ id: string; name: string; category: string; len: number }>
+              >(
+                Prisma.sql`
+                  SELECT "id", "name", "category", length("content")::int AS len
+                  FROM "Document"
+                  WHERE "active" = true
+                    AND ${
+                      scopedCategories
+                        ? Prisma.sql`"category" IN (${Prisma.join(scopedCategories)})`
+                        : excludedCategories.length > 0
+                          ? Prisma.sql`"category" NOT IN (${Prisma.join(excludedCategories)})`
+                          : Prisma.sql`true`
+                    }
+                  ORDER BY "order" ASC, "createdAt" DESC
+                `
+              )
+
+        if (documentSizes.length > 0) {
           // Prioriza documentos do cliente efetivo para evitar que o cap de 80K chars
           // exclua o cliente relevante quando há muitos docs.
           const prioritized = effectiveClient
             ? [
-                ...documents.filter(d => d.category === effectiveClient || d.category === `instrucoes-${effectiveClient}`),
-                ...documents.filter(d => d.category !== effectiveClient && d.category !== `instrucoes-${effectiveClient}`),
+                ...documentSizes.filter(d => d.category === effectiveClient || d.category === `instrucoes-${effectiveClient}`),
+                ...documentSizes.filter(d => d.category !== effectiveClient && d.category !== `instrucoes-${effectiveClient}`),
               ]
-            : documents
+            : documentSizes
 
           let total = 0
-          const selected: typeof documents = []
+          const selected: typeof documentSizes = []
 
           for (const doc of prioritized) {
-            if (total + doc.content.length > CONTEXT_CHAR_CAP) {
+            if (total + doc.len > CONTEXT_CHAR_CAP) {
               console.warn(`[chat] Context cap reached at document "${doc.name}", skipping remaining`)
               break
             }
             selected.push(doc)
-            total += doc.content.length
+            total += doc.len
           }
 
           if (selected.length > 0) {
+            // Segunda etapa: o texto, só dos documentos que couberam no cap.
+            const contentById = new Map(
+              (
+                await prisma.document.findMany({
+                  where: { id: { in: selected.map(d => d.id) } },
+                  select: { id: true, content: true },
+                })
+              ).map(row => [row.id, row.content])
+            )
+
             const docsText = selected
+              .map(doc => ({ name: doc.name, content: contentById.get(doc.id) }))
+              .filter((doc): doc is { name: string; content: string } => doc.content !== undefined)
               .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
               .join('\n\n---\n\n')
-            fallbackText = `## Documentação Operacional\n\n${docsText}`
+
+            if (docsText) {
+              fallbackText = `## Documentação Operacional\n\n${docsText}`
+            }
           }
         }
       } catch {
