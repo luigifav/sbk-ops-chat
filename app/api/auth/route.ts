@@ -192,7 +192,21 @@ export async function POST(req: NextRequest) {
     })
 
     return response
-  } catch {
+  } catch (err) {
+    // A resposta ao cliente continua genérica de propósito: nada sobre banco,
+    // schema ou variável de ambiente deve chegar à tela de login. Mas engolir a
+    // exceção sem registrar nada torna qualquer 500 aqui indiagnosticável, e o
+    // login é o ponto onde uma indisponibilidade para de ter contorno. O log
+    // vai para o runtime da função (Vercel) e é o único lugar onde a causa real
+    // aparece.
+    console.error('[auth] Falha no login do operador:', JSON.stringify({
+      name: err instanceof Error ? err.name : typeof err,
+      message: err instanceof Error ? err.message : String(err),
+      // Prisma marca erros de banco com `code` (P1001 sem conexão, P2021 tabela
+      // ausente, P2022 coluna ausente, P2024 pool esgotado). É o que distingue
+      // banco fora do ar de schema em drift.
+      code: (err as { code?: string })?.code ?? null,
+    }))
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

@@ -47,13 +47,64 @@ export async function GET(req: NextRequest) {
     ...(operatorName ? { operatorName } : {}),
   }
 
+  // Quantas mensagens a tabela de "perguntas recentes" devolve ao cliente. O
+  // dashboard renderiza 50 deste conjunto.
+  const RECENT_MESSAGES_LIMIT = 200
+
+  // Exportação de CSV: é o único consumidor que precisa de `question` e `answer`
+  // de todas as mensagens do período, e sai antes dos agregados para que o
+  // caminho normal do dashboard nunca pague por esse volume.
+  if (exportCsv) {
+    const csvRows = await prisma.message.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        operatorName: true,
+        theme: true,
+        question: true,
+        answer: true,
+        responseTimeMs: true,
+        createdAt: true,
+      },
+    })
+
+    const header = 'id,operatorName,theme,question,answer,responseTimeMs,createdAt\n'
+    const rows = csvRows
+      .map((m) =>
+        [
+          escapeCsvField(m.id),
+          escapeCsvField(m.operatorName ?? 'Anônimo'),
+          escapeCsvField(m.theme ?? 'Outros'),
+          escapeCsvField(m.question),
+          escapeCsvField(m.answer),
+          String(m.responseTimeMs),
+          m.createdAt.toISOString(),
+        ].join(',')
+      )
+      .join('\n')
+
+    return new Response(header + rows, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="sbk-analytics.csv"',
+      },
+    })
+  }
+
+  // Conjunto que alimenta TODOS os agregados desta rota. `question` e `answer`
+  // ficam fora de propósito: nenhum agregado os usa, e no payload só entram as
+  // perguntas das RECENT_MESSAGES_LIMIT mais recentes, buscadas em consulta
+  // própria mais abaixo. Selecioná-los aqui movia o texto integral de toda
+  // mensagem do período do banco para a função a cada carregamento do dashboard,
+  // para exibir 50 delas truncadas. Num período de 30 dias isso é a maior
+  // transferência de dados do projeto, e transferência é recurso cobrado e
+  // limitado à parte dos tokens.
   const messages = await prisma.message.findMany({
     where,
     orderBy: { createdAt: 'desc' },
     select: {
       id: true,
-      question: true,
-      answer: true,
       operatorName: true,
       sessionId: true,
       responseTimeMs: true,
@@ -81,29 +132,6 @@ export async function GET(req: NextRequest) {
   // nem escrever no banco. A classificação acontece na gravação da mensagem,
   // via classifyAndSaveTheme (lib/theme.ts).
 
-  if (exportCsv) {
-    const header = 'id,operatorName,theme,question,answer,responseTimeMs,createdAt\n'
-    const rows = messages
-      .map((m) =>
-        [
-          escapeCsvField(m.id),
-          escapeCsvField(m.operatorName ?? 'Anônimo'),
-          escapeCsvField(m.theme ?? 'Outros'),
-          escapeCsvField(m.question),
-          escapeCsvField(m.answer),
-          String(m.responseTimeMs),
-          m.createdAt.toISOString(),
-        ].join(',')
-      )
-      .join('\n')
-
-    return new Response(header + rows, {
-      headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="sbk-analytics.csv"',
-      },
-    })
-  }
 
   // Volume by day (Brazil timezone — en-CA locale gives YYYY-MM-DD format)
   const volumeByDay = messages.reduce<Record<string, number>>((acc, msg) => {
@@ -371,6 +399,23 @@ export async function GET(req: NextRequest) {
     orderBy: { _count: { id: 'desc' } },
   })
 
+  // As perguntas recentes da tabela do dashboard. Só aqui `question` sai do
+  // banco, e só para as linhas que realmente vão ao cliente. `answer` não entra:
+  // nada na tela o exibe, e o tipo AnalyticsMessage do dashboard nem o declara.
+  const recentMessages = await prisma.message.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: RECENT_MESSAGES_LIMIT,
+    select: {
+      id: true,
+      question: true,
+      operatorName: true,
+      theme: true,
+      createdAt: true,
+      responseTimeMs: true,
+    },
+  })
+
   return NextResponse.json({
     summary: { totalMessages, avgResponseMs, uniqueOperators, topTheme },
     volumeChartData,
@@ -381,7 +426,7 @@ export async function GET(req: NextRequest) {
     costPerMessageData,
     clientChartData,
     dailyCostChartData,
-    messages: messages.slice(0, 200),
+    messages: recentMessages,
     operators: allOperators.map((o) => ({
       name: o.operatorName,
       total: o._count.id,

@@ -104,8 +104,17 @@ Faca push para o branch principal — o deploy acontece automaticamente.
 Apos o primeiro deploy, execute localmente com a `DATABASE_URL` de producao:
 
 ```bash
-npx prisma db push
+npm run db:migrate:deploy
 ```
+
+> **Nao use `prisma db push` em producao.** Ele cria o schema, mas deixa a tabela
+> `_prisma_migrations` vazia, e a partir dai `migrate deploy` tenta aplicar tudo
+> desde a primeira migracao e falha. Foi assim que o diretorio de migracoes ficou
+> incapaz de reconstruir o schema por varios meses. O banco precisa de pgvector
+> 0.5.0 ou superior, por causa do indice HNSW.
+
+Se o banco cair ou for perdido, o caminho de diagnostico e de reconstrucao esta
+em [`docs/runbook-recuperacao-banco.md`](docs/runbook-recuperacao-banco.md).
 
 ---
 
@@ -124,7 +133,8 @@ npx prisma db push
 ```bash
 npm run dev          # servidor de desenvolvimento
 npm run build        # build de producao
-npm run db:push      # sincroniza schema com o banco
+npm run db:migrate:deploy  # aplica as migracoes pendentes (usar em producao)
+npm run db:push      # sincroniza schema sem migracao (apenas dev local)
 npm run db:generate  # regenera o Prisma Client
 npx prisma studio    # interface visual do banco (local)
 ```
