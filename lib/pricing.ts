@@ -147,6 +147,34 @@ export function costUsd(usage: TokenUsage, model: string | null | undefined): nu
 }
 
 /**
+ * Custo APENAS do lado de entrada: entrada não cacheada, leitura de cache e as
+ * duas faixas de gravação. Não inclui saída.
+ *
+ * Existe para comparar mensagens cujo conteúdo de CONTEXTO difere. O caso que
+ * motivou a função é o custo extra do fallback do RAG: comparar `inputTokens`
+ * entre mensagens com e sem fallback dá um número errado, e com o sinal
+ * invertido, porque o dump de documentos do fallback é um bloco CACHEADO — os
+ * tokens dele caem em `cacheReadTokens` ou `cacheCreationTokens` e nunca em
+ * `inputTokens`, enquanto os trechos de RAG do caminho normal não são cacheados
+ * e caem inteiros em `inputTokens`. Medido por `inputTokens`, o caminho caro
+ * parecia o barato.
+ *
+ * Usar `costUsd` inteiro também não serve para essa comparação: a saída custa
+ * 15,00 USD/1M contra 3,00 da entrada, então ela domina a diferença e o número
+ * passa a medir "respostas de fallback são mais longas", que é outra pergunta.
+ */
+export function inputSideCostUsd(usage: TokenUsage, model: string | null | undefined): number {
+  const p = pricingFor(model)
+  const { tokens5m, tokens1h } = splitCacheCreation(usage)
+  return (
+    ((usage.inputTokens ?? 0) / 1_000_000) * p.input +
+    ((usage.cacheReadTokens ?? 0) / 1_000_000) * p.cacheRead +
+    (tokens5m / 1_000_000) * p.cacheCreation +
+    (tokens1h / 1_000_000) * p.cacheCreation1h
+  )
+}
+
+/**
  * Custo que o mesmo uso teria sem nenhum cache: todo token de cache (lido ou
  * gravado) cobrado como entrada normal. A diferença contra `costUsd` é a
  * economia atribuída ao cache de prompt.

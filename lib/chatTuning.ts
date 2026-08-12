@@ -25,8 +25,8 @@
  *
  * Chaves em `Setting` (todas opcionais, ausência significa usar o default):
  *
- *   chat_effort_petition       low | medium | high | xhigh | max
- *   chat_effort_simple         low | medium | high | xhigh | max
+ *   chat_effort_petition       low | medium | high | max
+ *   chat_effort_simple         low | medium | high | max
  *   chat_max_tokens_petition   inteiro entre 256 e 8192
  *   chat_max_tokens_simple     inteiro entre 256 e 8192
  *
@@ -36,9 +36,23 @@
 
 import { prisma } from '@/lib/prisma'
 
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+/**
+ * Níveis aceitos pelo modelo do chat.
+ *
+ * NÃO inclui `xhigh` de propósito. O `xhigh` só existe a partir do Opus 4.7; o
+ * Sonnet 4.6, que é o CHAT_MODEL (lib/pricing.ts), aceita apenas low, medium,
+ * high e max. Enquanto ele constava aqui, um valor `xhigh` gravado em `Setting`
+ * passava na validação local, ia direto para `output_config` na rota e era
+ * rejeitado pela API: a exceção estourava dentro do ReadableStream e derrubava
+ * TODAS as mensagens daquele modo, o oposto da promessa de que configuração
+ * errada no painel nunca vira indisponibilidade.
+ *
+ * Ao trocar CHAT_MODEL, revise esta lista contra os níveis do modelo novo. Ela é
+ * a última barreira entre o painel e a API.
+ */
+export type Effort = 'low' | 'medium' | 'high' | 'max'
 
-const VALID_EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+const VALID_EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'max']
 
 /** Teto de segurança para `max_tokens` vindo de configuração. */
 const MIN_MAX_TOKENS = 256

@@ -120,6 +120,24 @@ interface CostData {
   // totalCacheCreation por faixa de TTL, que têm preços diferentes.
   totalCacheCreation5m?: number
   totalCacheCreation1h?: number
+  /**
+   * Leituras de cache por token gravado. É o número que decide o TTL: com TTL
+   * de 1 h o ponto de equilíbrio é 1,11 (ver lib/metrics.ts). Nulo quando não
+   * houve gravação no período.
+   */
+  cacheReadsPerWrite?: number | null
+  /**
+   * Tamanho médio de cada bloco do prompt, em caracteres. Responde de qual
+   * bloco vem o custo de entrada, que é o que decide o que dá para encolher.
+   */
+  promptComposition?: {
+    measured: number
+    avgFixedChars: number | null
+    avgClientChars: number | null
+    avgFallbackChars: number | null
+    avgHistoryChars: number | null
+    contextCapHitRate: number | null
+  }
   modelBreakdown?: ModelBreakdownEntry[]
   truncatedCount?: number
   truncationRate?: number
@@ -448,7 +466,19 @@ function AnalyticsPanel() {
               {
                 label: 'Cache hit rate',
                 value: `${(costData.cacheHitRate * 100).toFixed(1)}%`,
-                sub: 'tokens lidos do cache',
+                sub: 'termômetro, não meta',
+              },
+              {
+                // O critério de decisão sobre o TTL, ao lado do hit rate, que
+                // tem teto abaixo de 100% por construção e por isso não serve
+                // como meta. Abaixo de 1,11 leitura por gravação, o TTL de 1 h
+                // está saindo mais caro que o de 5 min.
+                label: 'Leituras por gravação',
+                value:
+                  costData.cacheReadsPerWrite != null
+                    ? costData.cacheReadsPerWrite.toFixed(2)
+                    : '-',
+                sub: 'TTL de 1 h se paga acima de 1,11',
               },
               {
                 label: 'Total de tokens',
@@ -514,6 +544,86 @@ function AnalyticsPanel() {
               </div>
             ))}
           </div>
+
+          {/* Composição do prompt: de qual bloco vem o custo de entrada.
+              Só aparece quando há mensagens instrumentadas no período, porque
+              as linhas anteriores à instrumentação não têm como ser medidas
+              retroativamente e um card zerado sugeriria prefixo inexistente. */}
+          {costData.promptComposition && costData.promptComposition.measured > 0 && (
+            <div className="bg-white rounded-xl border border-brand-verde-escuro/[0.06] p-5">
+              <div className="flex items-baseline justify-between mb-1">
+                <h3 className="text-sm font-semibold text-brand-verde-escuro">
+                  Composição do prompt
+                </h3>
+                <span className="text-[10px] text-brand-cinza-chumbo">
+                  média de {costData.promptComposition.measured.toLocaleString('pt-BR')} mensagens
+                </span>
+              </div>
+              <p className="text-[10px] text-brand-cinza-chumbo mb-4">
+                Tamanho médio de cada bloco em caracteres. Aproximadamente 3,5 caracteres por
+                token em português. É o que diz qual bloco vale encolher.
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
+                {[
+                  {
+                    label: 'Instruções fixas',
+                    value: costData.promptComposition.avgFixedChars,
+                    sub: 'cacheado, compartilhado por todos',
+                  },
+                  {
+                    label: 'Instruções do cliente',
+                    value: costData.promptComposition.avgClientChars,
+                    sub: 'cacheado, uma cópia por escopo',
+                  },
+                  {
+                    label: 'Dump de fallback',
+                    value: costData.promptComposition.avgFallbackChars,
+                    sub: 'cacheado, só quando o RAG falha',
+                  },
+                  {
+                    label: 'Histórico',
+                    value: costData.promptComposition.avgHistoryChars,
+                    sub: 'não cacheado, entrada cheia',
+                  },
+                ].map((card) => (
+                  <div key={card.label} className="bg-brand-gelo/60 rounded-lg p-3">
+                    <p className="text-[11px] text-brand-cinza-chumbo uppercase tracking-[0.08em] mb-1">
+                      {card.label}
+                    </p>
+                    <p className="text-lg font-semibold text-brand-verde-escuro">
+                      {card.value != null ? card.value.toLocaleString('pt-BR') : '-'}
+                    </p>
+                    <p className="text-[10px] text-brand-cinza-chumbo mt-0.5">{card.sub}</p>
+                  </div>
+                ))}
+                <div
+                  className={`rounded-lg p-3 ${
+                    (costData.promptComposition.contextCapHitRate ?? 0) > 0
+                      ? 'bg-red-50'
+                      : 'bg-brand-gelo/60'
+                  }`}
+                >
+                  <p className="text-[11px] text-brand-cinza-chumbo uppercase tracking-[0.08em] mb-1">
+                    Cortado pelo cap
+                  </p>
+                  <p
+                    className={`text-lg font-semibold ${
+                      (costData.promptComposition.contextCapHitRate ?? 0) > 0
+                        ? 'text-red-500'
+                        : 'text-brand-verde-escuro'
+                    }`}
+                  >
+                    {costData.promptComposition.contextCapHitRate != null
+                      ? `${(costData.promptComposition.contextCapHitRate * 100).toFixed(1)}%`
+                      : '-'}
+                  </p>
+                  <p className="text-[10px] text-brand-cinza-chumbo mt-0.5">
+                    respondeu com documentação incompleta
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Daily cost chart */}
           {dailyCostData.length > 1 && (

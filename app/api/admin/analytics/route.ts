@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
-import { CHAT_MODEL, costUsd, labelFor, pricingFor } from '@/lib/pricing'
+import { EVAL_OPERATOR_NAME } from '@/lib/evalMode'
+import { costUsd, inputSideCostUsd, labelFor, pricingFor } from '@/lib/pricing'
 import { computeMessageMetrics } from '@/lib/metrics'
 
 export const dynamic = 'force-dynamic'
@@ -42,9 +44,25 @@ export async function GET(req: NextRequest) {
     dateRange = { gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
   }
 
-  const where = {
+  // O operador do harness de avaliação fica FORA das métricas por padrão.
+  //
+  // Uma rodada do harness são dezenas de mensagens de uma vez, com perguntas que
+  // ninguém fez e respostas que ninguém leu. Todo dia em que alguém rodar o eval
+  // vira um pico de custo e de volume no painel, e é justamente o painel que vai
+  // ser usado para decidir se uma otimização economizou: a medição contaminaria
+  // exatamente a comparação que o harness existe para viabilizar. Tanto
+  // evals/extract.ts quanto scripts/measure.ts já excluem este operador; a rota
+  // do dashboard era a que faltava.
+  //
+  // Quando o operador é escolhido explicitamente no filtro, a exclusão cede:
+  // selecionar `__eval__` no dropdown e receber zero mensagens seria confuso.
+  // O `AND` é explícito de propósito — dois spreads da mesma chave
+  // `operatorName` no mesmo objeto se sobrescreveriam em silêncio.
+  const where: Prisma.MessageWhereInput = {
     ...(Object.keys(dateRange).length > 0 ? { createdAt: dateRange } : {}),
-    ...(operatorName ? { operatorName } : {}),
+    ...(operatorName
+      ? { operatorName }
+      : { NOT: { operatorName: EVAL_OPERATOR_NAME } }),
   }
 
   // Quantas mensagens a tabela de "perguntas recentes" devolve ao cliente. O
@@ -120,6 +138,13 @@ export async function GET(req: NextRequest) {
       ragTopScore: true,
       model: true,
       stopReason: true,
+      // Composição do prompt. Alimenta o card que responde de qual bloco vem o
+      // custo de entrada, que é o que decide o que dá para encolher.
+      fixedChars: true,
+      clientChars: true,
+      fallbackChars: true,
+      historyChars: true,
+      contextCapHit: true,
     },
   })
 
@@ -130,7 +155,8 @@ export async function GET(req: NextRequest) {
   // ficava sem tema para sempre, sendo reclassificada em cada carregamento do
   // dashboard, indefinidamente. Um caminho de leitura não deve gastar tokens
   // nem escrever no banco. A classificação acontece na gravação da mensagem,
-  // via classifyAndSaveTheme (lib/theme.ts).
+  // via classifyTheme (lib/theme.ts), que no modo padrão é heurística e não
+  // gasta token nenhum.
 
 
   // Volume by day (Brazil timezone — en-CA locale gives YYYY-MM-DD format)
@@ -224,6 +250,7 @@ export async function GET(req: NextRequest) {
     estimatedCostUsd,
     cacheSavingsUsd,
     cacheHitRate,
+    cacheReadsPerWrite,
     buckets,
   } = metrics
 
@@ -250,30 +277,39 @@ export async function GET(req: NextRequest) {
     })
     .sort((a, b) => b.costUsd - a.costUsd)
 
-  // Modelo dominante do período (por custo). Usado nas estimativas que não
-  // conseguem ser feitas por mensagem, como o custo extra de fallback.
-  const primaryModel = modelBreakdown[0]?.model ?? CHAT_MODEL
-  const primaryPrices = pricingFor(primaryModel)
-
   // Qualidade da resposta (truncamento por max_tokens, requisições que não
   // chegaram ao fim) e saúde do RAG: calculados em lib/metrics.ts.
   const { truncatedCount, truncationRate, failedCount, fallbackRate, avgRagScore } = metrics
 
-  // O custo extra do fallback precisa das linhas, não só das contagens, porque
-  // compara a média de inputTokens dos dois grupos.
+  // Custo extra atribuível ao fallback do RAG.
+  //
+  // Compara o custo do LADO DE ENTRADA das mensagens que caíram no fallback com
+  // o das que usaram trechos recuperados, e multiplica a diferença pelo número
+  // de mensagens de fallback do período.
+  //
+  // Antes esta conta comparava a média de `inputTokens` dos dois grupos, e o
+  // número saía errado com o sinal invertido: o dump de documentos do fallback é
+  // um bloco CACHEADO (cache_control em buildSystemBlocks), então os tokens dele
+  // vão para `cacheReadTokens`/`cacheCreationTokens` e nunca para `inputTokens`,
+  // enquanto os trechos de RAG do caminho normal não são cacheados e caem
+  // inteiros em `inputTokens`. Medido assim, o caminho caro parecia o barato e o
+  // card do dashboard tendia a zero ou a um número negativo. Ver
+  // `inputSideCostUsd` em lib/pricing.ts.
+  //
+  // Cada linha é precificada pelo modelo que a atendeu (`m.model`), não pelo
+  // modelo predominante do período: uma troca de modelo no meio da série faria a
+  // média misturar preços diferentes.
   const fallbackRows = messages.filter((m) => m.ragFallback)
   const ragRows = messages.filter((m) => !m.ragFallback && m.ragTopScore != null)
-  const avgInputRag =
-    ragRows.length > 0
-      ? ragRows.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / ragRows.length
+  const avgInputCost = (rows: typeof messages): number | null =>
+    rows.length > 0
+      ? rows.reduce((s, m) => s + inputSideCostUsd(m, m.model), 0) / rows.length
       : null
-  const avgInputFallback =
-    fallbackRows.length > 0
-      ? fallbackRows.reduce((s, m) => s + (m.inputTokens ?? 0), 0) / fallbackRows.length
-      : null
+  const avgCostRag = avgInputCost(ragRows)
+  const avgCostFallback = avgInputCost(fallbackRows)
   const fallbackCostUsd =
-    avgInputRag != null && avgInputFallback != null
-      ? ((avgInputFallback - avgInputRag) / 1_000_000) * primaryPrices.input * fallbackRows.length
+    avgCostRag != null && avgCostFallback != null
+      ? (avgCostFallback - avgCostRag) * fallbackRows.length
       : null
 
   // Daily cost chart
@@ -293,6 +329,35 @@ export async function GET(req: NextRequest) {
       custo: parseFloat(cost.toFixed(4)),
     }))
 
+  // COMPOSIÇÃO DO PROMPT, agregada sobre as linhas que têm a instrumentação.
+  //
+  // Só entram linhas com `fixedChars` não nulo: as anteriores à migração não
+  // foram medidas, e tratá-las como zero puxaria todas as médias para baixo e
+  // faria o prefixo parecer menor do que é justamente na comparação
+  // antes/depois. `measured` diz sobre quantas mensagens a média foi feita, para
+  // o painel não sugerir conclusão em cima de amostra pequena.
+  const composed = messages.filter((m) => m.fixedChars != null)
+  const avgOf = (pick: (m: (typeof composed)[number]) => number | null): number | null =>
+    composed.length > 0
+      ? Math.round(composed.reduce((s, m) => s + (pick(m) ?? 0), 0) / composed.length)
+      : null
+  const promptComposition = {
+    measured: composed.length,
+    avgFixedChars: avgOf((m) => m.fixedChars),
+    avgClientChars: avgOf((m) => m.clientChars),
+    avgFallbackChars: avgOf((m) => m.fallbackChars),
+    avgHistoryChars: avgOf((m) => m.historyChars),
+    // Fração das mensagens medidas em que o cap de 80.000 caracteres cortou
+    // documentação. Se ficar em zero por semanas, o número 80.000 não morde e
+    // mexer nele economiza exatamente nada. Se for maior que zero, o problema
+    // não é o valor do cap: é o modelo responder com corpus incompleto sem
+    // nenhum sinal disso no prompt.
+    contextCapHitRate:
+      composed.length > 0
+        ? composed.filter((m) => m.contextCapHit).length / composed.length
+        : null,
+  }
+
   const costData = {
     totalInput,
     totalOutput,
@@ -303,9 +368,11 @@ export async function GET(req: NextRequest) {
     estimatedCostUsd,
     cacheSavingsUsd,
     cacheHitRate,
+    cacheReadsPerWrite,
     fallbackRate,
     avgRagScore,
     fallbackCostUsd,
+    promptComposition,
     modelBreakdown,
     truncatedCount,
     truncationRate,

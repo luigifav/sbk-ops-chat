@@ -40,6 +40,27 @@ model Message {
   // requisição não chega ao fim: 'timeout' (abort por STREAM_TIMEOUT_MS) e
   // 'error'. Nulo nas linhas anteriores a esta coluna.
   stopReason           String?
+
+  // COMPOSIÇÃO DO PROMPT. Tamanho de cada bloco do system, em CARACTERES.
+  //
+  // Existem porque o custo por mensagem já era medido, mas de forma agregada:
+  // dava para ver que uma mensagem gastou 35 mil tokens de entrada e não de qual
+  // bloco eles vieram. Como cada bloco tem uma alavanca de redução diferente, e
+  // com risco de qualidade diferente, sem esta quebra qualquer decisão sobre o
+  // que encolher é chute. Preenchidas no mesmo INSERT que já existia: nenhuma
+  // chamada de API a mais.
+  //
+  // Caracteres, e não tokens, porque contar tokens exigiria uma chamada de API
+  // por mensagem. Para português a razão fica em torno de 3,5 caracteres por
+  // token. Nulas nas linhas gravadas antes destas colunas existirem.
+  fixedChars           Int?
+  clientChars          Int?
+  fallbackChars        Int?
+  historyChars         Int?
+  // O cap de 80.000 caracteres cortou documentação nesta mensagem. Quando é
+  // true, o modelo respondeu com documentação incompleta sob a instrução de
+  // exclusividade documental, sem saber que faltava material.
+  contextCapHit        Boolean?
 }
 
 model Setting {

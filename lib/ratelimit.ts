@@ -27,18 +27,33 @@ if (!redis) {
 interface Entry {
   count: number
   windowStart: number
+  /**
+   * Duração da janela desta chave, em ms. Guardada por entrada porque o mesmo
+   * store atende janelas de tamanhos diferentes: o teto horário do chat usa 1 h
+   * e o teto diário usa 24 h sobre uma chave derivada da mesma origem.
+   */
+  windowMs: number
 }
 
 const store = new Map<string, Entry>()
 
-// Periodic GC to prevent unbounded memory growth.
-// Only runs in long-lived Node.js processes; ignored in Edge runtime.
+// GC periódico, para o store não crescer sem limite. Só roda em processo Node
+// de vida longa; no runtime Edge não há setInterval e o bloco é ignorado.
+//
+// O corte é por janela DA PRÓPRIA ENTRADA, não por um prazo fixo. Antes ele
+// descartava tudo com mais de 1 h, o que apagava a entrada do teto diário, cuja
+// janela é de 24 h: o contador de 250 mensagens por dia se reiniciava sozinho a
+// cada hora e nunca era alcançado. Sem Redis, o teto efetivo virava o horário
+// (60/h x 24 = 1.440 mensagens por operador por dia), ordens de magnitude acima
+// do que o limite diário existe para permitir. Uma entrada só pode ser
+// descartada depois que a janela dela expira, senão o descarte é o próprio
+// bypass do limite.
 if (typeof setInterval !== 'undefined') {
   setInterval(
     () => {
-      const cutoff = Date.now() - 60 * 60 * 1_000 // discard entries older than 1 h
+      const now = Date.now()
       for (const [k, e] of Array.from(store.entries())) {
-        if (e.windowStart < cutoff) store.delete(k)
+        if (now - e.windowStart >= e.windowMs) store.delete(k)
       }
     },
     5 * 60 * 1_000
@@ -57,7 +72,7 @@ function checkRateLimitMemory(key: string, limit: number, windowMs: number): Rat
 
   if (!entry || now - entry.windowStart >= windowMs) {
     // New window — reset counter
-    store.set(key, { count: 1, windowStart: now })
+    store.set(key, { count: 1, windowStart: now, windowMs })
     return { allowed: true, remaining: limit - 1, resetAt: now + windowMs }
   }
 

@@ -57,8 +57,31 @@ export interface MessageMetrics {
   cacheSavingsUsd: number
   costPerMessageUsd: number | null
 
-  /** Fração dos tokens de entrada que veio de leitura de cache. */
+  /**
+   * Fração dos tokens de entrada que veio de leitura de cache.
+   *
+   * Útil como termômetro, ruim como critério: o denominador inclui tudo que
+   * nunca é cacheável (trechos de RAG, histórico, a pergunta), então o teto
+   * alcançável não é 100% e ainda por cima se move conforme o histórico cresce.
+   * Uma meta escrita em cima deste número é inatingível por construção. Para
+   * decidir alguma coisa, use `cacheReadsPerWrite`.
+   */
   cacheHitRate: number
+
+  /**
+   * Leituras de cache por token gravado. É este o número que decide o TTL.
+   *
+   * A conta vem dos multiplicadores da Anthropic. Com TTL de 1 h a gravação
+   * custa 2,00x a entrada e a leitura 0,10x, então gravar uma vez e ler R vezes
+   * sai por 2,00 + 0,10R contra R + 1 sem cache nenhum; o ponto de equilíbrio é
+   * R = 1,11. Com TTL de 5 min a gravação custa 1,25x e o equilíbrio cai para
+   * R = 0,28.
+   *
+   * Leitura prática: abaixo de 1,11 o TTL de 1 h está perdendo dinheiro e o de
+   * 5 min seria mais barato. Acima, está pagando. Nulo quando não houve
+   * gravação nenhuma no período (não há divisão a fazer, e zero seria mentira).
+   */
+  cacheReadsPerWrite: number | null
 
   fallbackMessages: number
   /** Mensagens que usaram trechos de RAG e têm score registrado. */
@@ -172,6 +195,7 @@ export function computeMessageMetrics(rows: MetricRow[]): MessageMetrics {
     costPerMessageUsd: totalMessages > 0 ? estimatedCostUsd / totalMessages : null,
 
     cacheHitRate: totalInputLike > 0 ? totalCacheRead / totalInputLike : 0,
+    cacheReadsPerWrite: totalCacheCreation > 0 ? totalCacheRead / totalCacheCreation : null,
 
     fallbackMessages: fallbackRows.length,
     ragMessages: ragRows.length,
