@@ -35,7 +35,7 @@ export interface ModelPricing {
 }
 
 /** Modelo que atende o chat (`app/api/chat/route.ts`). */
-export const CHAT_MODEL = 'claude-sonnet-4-6'
+export const CHAT_MODEL = 'claude-sonnet-5'
 
 /** Modelo que classifica o tema das perguntas (`lib/theme.ts`). */
 export const THEME_MODEL = 'claude-haiku-4-5-20251001'
@@ -48,6 +48,16 @@ export const THEME_MODEL = 'claude-haiku-4-5-20251001'
 export const EMBEDDING_MODEL = 'voyage-3'
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
+  'claude-sonnet-5': {
+    input: 3.0,
+    output: 15.0,
+    cacheRead: 0.3,
+    cacheCreation: 3.75,
+    cacheCreation1h: 6.0,
+  },
+  // Mantido mesmo não sendo mais o CHAT_MODEL atual: LEGACY_MESSAGE_MODEL
+  // aponta para este id, e mensagens antigas gravadas sem Message.model (ou
+  // com este id explícito) continuam precisando de preço e rótulo próprios.
   'claude-sonnet-4-6': {
     input: 3.0,
     output: 15.0,
@@ -66,6 +76,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
 /** Rótulos curtos para exibição no dashboard. */
 export const MODEL_LABELS: Record<string, string> = {
+  'claude-sonnet-5': 'Sonnet 5',
   'claude-sonnet-4-6': 'Sonnet 4.6',
   'claude-haiku-4-5-20251001': 'Haiku 4.5',
 }
@@ -74,8 +85,13 @@ export const MODEL_LABELS: Record<string, string> = {
  * Modelo assumido para as mensagens gravadas antes da coluna `Message.model`
  * existir. Todas foram atendidas pelo Sonnet 4.6, então o histórico continua
  * precificado corretamente e a comparação antes/depois não fica ambígua.
+ *
+ * FIXO em 'claude-sonnet-4-6', e não em CHAT_MODEL: essas mensagens antigas
+ * foram de fato atendidas pelo Sonnet 4.6, não pelo modelo de chat atual. Uma
+ * futura troca de CHAT_MODEL não deve reescrever o modelo assumido para
+ * dados históricos que já existiam antes da migração.
  */
-export const LEGACY_MESSAGE_MODEL = CHAT_MODEL
+export const LEGACY_MESSAGE_MODEL = 'claude-sonnet-4-6'
 
 // Evita repetir o mesmo aviso a cada mensagem do período ao renderizar o
 // dashboard: um modelo desconhecido é problema de configuração, não de dado.
