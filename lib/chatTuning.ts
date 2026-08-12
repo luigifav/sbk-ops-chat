@@ -15,8 +15,8 @@
  * Daí os valores serem por modo.
  *
  * IMPORTANTE, sobre os defaults: eles reproduzem exatamente o comportamento de
- * hoje (`effort` alto nos dois modos, que é o default do Sonnet 4.6, e 2048
- * tokens de saída nos dois). Isso é deliberado. A própria issue #65 manda escolher
+ * hoje (`effort` alto nos dois modos, que é o default também do Sonnet 5, o
+ * CHAT_MODEL atual, e 2048 tokens de saída nos dois). Isso é deliberado. A própria issue #65 manda escolher
  * o `effort` pelo par acerto e custo medido no harness de avaliação (issue #60), e
  * enquanto esse harness não existir, baixar o `effort` no escuro seria a aposta
  * que a #60 foi aberta para evitar. Então este módulo entrega o mecanismo e deixa
@@ -39,13 +39,16 @@ import { prisma } from '@/lib/prisma'
 /**
  * Níveis aceitos pelo modelo do chat.
  *
- * NÃO inclui `xhigh` de propósito. O `xhigh` só existe a partir do Opus 4.7; o
- * Sonnet 4.6, que é o CHAT_MODEL (lib/pricing.ts), aceita apenas low, medium,
- * high e max. Enquanto ele constava aqui, um valor `xhigh` gravado em `Setting`
- * passava na validação local, ia direto para `output_config` na rota e era
- * rejeitado pela API: a exceção estourava dentro do ReadableStream e derrubava
- * TODAS as mensagens daquele modo, o oposto da promessa de que configuração
- * errada no painel nunca vira indisponibilidade.
+ * NÃO inclui `xhigh` de propósito, mesmo o Sonnet 5 (CHAT_MODEL atual,
+ * lib/pricing.ts) aceitando `low`, `medium`, `high`, `xhigh` e `max`. Esta
+ * lista já causou incidente antes: quando o CHAT_MODEL era o Sonnet 4.6, que
+ * não aceita `xhigh`, um valor `xhigh` gravado em `Setting` passava na
+ * validação local, ia direto para `output_config` na rota e era rejeitado
+ * pela API — a exceção estourava dentro do ReadableStream e derrubava TODAS
+ * as mensagens daquele modo, o oposto da promessa de que configuração errada
+ * no painel nunca vira indisponibilidade. Reabilitar `xhigh` exigiria também
+ * revisar TUNING_DEFAULTS e o harness de avaliação da issue #60 antes de
+ * expor a opção no painel, então por ora ela continua fora da lista.
  *
  * Ao trocar CHAT_MODEL, revise esta lista contra os níveis do modelo novo. Ela é
  * a última barreira entre o painel e a API.

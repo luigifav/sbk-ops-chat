@@ -122,8 +122,9 @@ const DOC_ORDER: Prisma.DocumentOrderByWithRelationInput[] = [
 ]
 
 // PISO DE CACHE: este bloco é o primeiro breakpoint de cache do system (ver a
-// montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 4.6 é de
-// 1024 tokens; com cerca de 4.800 caracteres em português este prompt fica na
+// montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 5 (CHAT_MODEL
+// atual) continua em 1024 tokens, igual ao Sonnet 4.6; com cerca de 4.800
+// caracteres em português este prompt fica na
 // faixa de 1,2K a 1,6K tokens, ou seja, com margem estreita. Se ele encolher
 // abaixo do piso, o breakpoint para de cachear silenciosamente, sem erro nem
 // aviso — só cai o cacheReadTokens no dashboard. Encolhendo o prompt base,
@@ -1048,12 +1049,11 @@ Regras obrigatórias:
               // Teto de saída por modo, configurável em Setting (issue #65).
               max_tokens: tuning.maxTokens,
               // EXPLÍCITO DE PROPÓSITO: este workload não usa extended thinking.
-              // No Sonnet 4.6 omitir o campo já significa desligado, então esta
-              // linha não muda nada hoje. Ela existe porque em modelos mais novos
-              // o default inverte e passa a ligar thinking adaptativo, e como
-              // max_tokens é um teto sobre thinking mais texto de resposta
-              // somados, uma futura troca de modelo sem tocar aqui produziria
-              // resposta truncada no meio, silenciosamente.
+              // No Sonnet 4.6 omitir o campo já significava desligado, mas no
+              // Sonnet 5 (CHAT_MODEL atual) omitir liga thinking adaptativo por
+              // padrão — e como max_tokens é um teto sobre thinking mais texto de
+              // resposta somados, deixar de declarar `disabled` aqui produziria
+              // resposta truncada no meio, silenciosamente, sem essa linha.
               thinking: { type: 'disabled' },
               // Roteado por isPetition: classificação de petição é extração
               // estruturada e precisa de esforço alto, pergunta operacional curta
