@@ -67,7 +67,16 @@ export async function POST(req: NextRequest) {
     })
 
     return response
-  } catch {
+  } catch (err) {
+    // Mesmo motivo de app/api/auth/route.ts: resposta genérica para o cliente,
+    // causa registrada no log da função. Esta rota não toca o banco, então um
+    // 500 aqui aponta para AUTH_SECRET ou para o Redis do rate limit, não para
+    // o Postgres, e essa distinção só é visível se a exceção for registrada.
+    console.error('[auth] Falha no login administrativo:', JSON.stringify({
+      name: err instanceof Error ? err.name : typeof err,
+      message: err instanceof Error ? err.message : String(err),
+      code: (err as { code?: string })?.code ?? null,
+    }))
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

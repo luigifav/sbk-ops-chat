@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/auth'
 import { checkRateLimit } from '@/lib/ratelimit'
-import { classifyAndSaveTheme } from '@/lib/theme'
+import { classifyTheme } from '@/lib/theme'
 import { recordRagOutcome } from '@/lib/ragHealth'
 import { CLIENT_IDS, GLOBAL_CATEGORIES } from '@/lib/categories'
 import { CHAT_MODEL } from '@/lib/pricing'
@@ -84,13 +85,15 @@ const RAG_CANDIDATE_LIMIT = 30
 const RAG_EF_SEARCH = 120
 // Piso de similaridade (1 - distância cosseno) para um trecho ser usado. Abaixo
 // dele a documentação recuperada não sustenta a resposta e o fallback é preferível.
+// Este piso NUNCA foi calibrado com medição: `git log -S 0.55` mostra só a troca
+// de 0,65 para 0,55, sem número por trás. Ele é a fronteira entre o caminho
+// barato (trechos ranqueados) e o caro (dump de documentos), então errá-lo para
+// cima manda pergunta respondível para o fallback e errá-lo para baixo faz o
+// modelo fundamentar resposta em trecho irrelevante. A distribuição de
+// `Message.ragTopScore` nas linhas com `ragFallback = true` é o dado que
+// calibra, e ela só passa a ser confiável com a remoção do teto de distância do
+// SQL (ver a consulta de candidatos).
 const RAG_MIN_SCORE = 0.55
-// Teto de distância aplicado no SQL. Mais frouxo que RAG_MIN_SCORE de propósito:
-// aqui ele serve só para limitar o volume trazido do banco, enquanto o piso de
-// relevância de verdade é aplicado em JS. A folga entre os dois deixa os
-// candidatos que passaram perto visíveis no log de fallback, que é o diagnóstico
-// de quem tenta separar "índice não achou" de "o corpus não tem a resposta".
-const RAG_CANDIDATE_MAX_DISTANCE = 0.6
 
 // cache_control dos blocos estáveis do system, declarado uma única vez para que
 // os três breakpoints não divirjam de TTL com o tempo. O motivo de 1 h está na
@@ -99,6 +102,24 @@ const STABLE_CACHE_CONTROL: Anthropic.CacheControlEphemeral = {
   type: 'ephemeral',
   ttl: '1h',
 }
+
+// Ordenação das leituras de `Document` que alimentam os blocos cacheados.
+//
+// O `id` no fim é desempate, e existe por causa do cache, não por estética.
+// `order` NÃO é único: app/api/admin/documents/route.ts gera `order` a partir de
+// um `count()` da tabela, então qualquer exclusão faz o próximo upload reusar um
+// valor já ocupado, e o PATCH do painel aceita `order` arbitrário. Com `order`
+// empatado, o único critério restante era `createdAt desc`, que também pode
+// empatar; sem desempate total o Postgres não garante a mesma ordem entre
+// consultas. Duas requisições que montassem os documentos em ordem diferente
+// produziriam prefixos diferentes byte a byte, e o bloco estável passaria a ser
+// GRAVADO a 6,00 USD/1M em toda mensagem em vez de lido a 0,30. É uma falha
+// cara e silenciosa: nada quebra, só o cacheReadTokens some do painel.
+const DOC_ORDER: Prisma.DocumentOrderByWithRelationInput[] = [
+  { order: 'asc' },
+  { createdAt: 'desc' },
+  { id: 'asc' },
+]
 
 // PISO DE CACHE: este bloco é o primeiro breakpoint de cache do system (ver a
 // montagem dos systemBlocks abaixo). O mínimo cacheável no Sonnet 4.6 é de
@@ -213,8 +234,8 @@ const anthropic = new Anthropic({
 })
 
 /**
- * Monta o bloco estável do system: instruções fixas globais mais as do cliente
- * efetivo, sem o prompt base.
+ * Monta os blocos estáveis do system: instruções fixas globais e instruções do
+ * cliente efetivo, SEPARADAS, sem o prompt base.
  *
  * Extraído da rota (issue #64) por dois motivos. O primeiro é que o pre-warm do
  * cache, se for implementado, precisa produzir um prefixo byte a byte idêntico ao
@@ -224,35 +245,48 @@ const anthropic = new Anthropic({
  * (`slice(BASE.length, dynamicContentStart)`): um prefixo cacheado não deveria
  * depender de aritmética de índices para ser reconstruído.
  *
+ * POR QUE OS DOIS TEXTOS VÊM SEPARADOS: as instruções fixas são idênticas para
+ * todo operador e todo cliente; as do cliente não. Enquanto os dois eram
+ * devolvidos concatenados, eles viravam um único bloco cacheado e cada valor
+ * distinto de `effectiveClient` gravava a sua própria cópia das instruções fixas,
+ * a 6,00 USD/1M (gravação com TTL de 1 h) em vez de lê-las a 0,30. Separados, o
+ * trecho global entra no primeiro bloco, que é byte a byte igual em todos os
+ * escopos, e passa a ser leitura de cache para todos eles. Ver a montagem em
+ * buildSystemBlocks.
+ *
  * Cada leitura fica em seu próprio try/catch, como antes: falhar em carregar as
  * instruções de um cliente não deve derrubar a resposta, e a categoria só entra
  * em `injectedCategories` quando a query de fato ocorreu, senão o fallback
  * deixaria de reenviar documentos que nunca foram injetados.
  */
 async function buildStaticClientPrompt(effectiveClient: string | null): Promise<{
-  text: string
+  /** Instruções fixas globais. Iguais em toda requisição. Vazio se não houver. */
+  fixedText: string
+  /** Instruções do cliente efetivo. Variam por escopo. Vazio se não houver. */
+  clientText: string
   /**
-   * Categorias cujos documentos já entraram no bloco estável. O fallback de RAG
-   * consulta este Set para não reenviar o mesmo conteúdo duplicado.
+   * Categorias cujos documentos já entraram nos blocos estáveis. O fallback de
+   * RAG consulta este Set para não reenviar o mesmo conteúdo duplicado.
    */
   injectedCategories: Set<string>
 }> {
-  const parts: string[] = []
+  const fixedParts: string[] = []
+  const clientParts: string[] = []
   const injectedCategories = new Set<string>()
 
   // Instruções fixas globais, sempre, independente de cliente.
   try {
     const fixedDocs = await prisma.document.findMany({
       where: { active: true, category: 'instrucoes-fixas' },
-      orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+      orderBy: DOC_ORDER,
       select: { name: true, content: true },
     })
     injectedCategories.add('instrucoes-fixas')
     if (fixedDocs.length > 0) {
-      const fixedText = fixedDocs
+      const body = fixedDocs
         .map(doc => `### ${doc.name}\n\n${doc.content}`)
         .join('\n\n---\n\n')
-      parts.push(`## Instruções Operacionais Fixas\n\n${fixedText}`)
+      fixedParts.push(`## Instruções Operacionais Fixas\n\n${body}`)
     }
   } catch (err) {
     console.warn('[chat] Falha ao carregar instruções fixas:', err)
@@ -270,17 +304,17 @@ async function buildStaticClientPrompt(effectiveClient: string | null): Promise<
       if (effectiveClient === clientId) {
         const clientDocs = await prisma.document.findMany({
           where: { active: true, category: { in: categories } },
-          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
+          orderBy: DOC_ORDER,
           select: { name: true, content: true },
         })
         categories.forEach(c => injectedCategories.add(c))
         if (clientDocs.length > 0) {
-          const clientText = clientDocs
+          const body = clientDocs
             .map(doc => `### ${doc.name}\n\n${doc.content}`)
             .join('\n\n---\n\n')
-          parts.push(`## Instruções Operacionais — ${categories[0]}\n\n${clientText}`)
+          clientParts.push(`## Instruções Operacionais — ${categories[0]}\n\n${body}`)
         } else {
-          parts.push(`> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`)
+          clientParts.push(`> **AVISO INTERNO:** Nenhum documento encontrado nas categorias [${categories.join(', ')}]. Se o operador pedir classificação para esse cliente, informe que o glossário de classificação não está configurado no painel e oriente a escalar para o suporte SBK.`)
         }
       }
     }
@@ -288,7 +322,11 @@ async function buildStaticClientPrompt(effectiveClient: string | null): Promise<
     console.warn('[chat] Falha ao carregar instruções por cliente:', err)
   }
 
-  return { text: parts.join('\n\n'), injectedCategories }
+  return {
+    fixedText: fixedParts.join('\n\n'),
+    clientText: clientParts.join('\n\n'),
+    injectedCategories,
+  }
 }
 
 /**
@@ -297,9 +335,22 @@ async function buildStaticClientPrompt(effectiveClient: string | null): Promise<
  * que muda invalida tudo que vem depois dele.
  *
  * ORÇAMENTO DE BREAKPOINTS: a API permite no máximo 4 por requisição. O pior caso
- * aqui usa 3, com base, staticClientText e fallbackText. Sobra 1 de folga; ao
+ * aqui usa 3, com base+fixas, clientText e fallbackText. Sobra 1 de folga; ao
  * usá-la, confirme que o prefixo até o novo breakpoint é estável entre
  * requisições, senão o efeito é apenas pagar a sobretaxa de gravação.
+ *
+ * POR QUE AS INSTRUÇÕES FIXAS ENTRAM NO MESMO BLOCO DO PROMPT BASE, e não num
+ * bloco próprio: as duas partes são idênticas em toda requisição, então a
+ * concatenação também é, e um bloco só já produz uma entrada de cache
+ * compartilhada por todos os escopos de cliente. Um breakpoint próprio para as
+ * fixas daria exatamente o mesmo efeito de cache e gastaria o último slot livre
+ * do orçamento. Antes desta separação as fixas vinham grudadas no texto do
+ * CLIENTE, e aí sim havia desperdício: cada escopo gravava a sua própria cópia
+ * das instruções globais a 6,00 USD/1M em vez de lê-las a 0,30.
+ *
+ * O que NÃO fazer: juntar o clientText neste primeiro bloco. Ele varia por
+ * escopo, e juntá-lo faria cada cliente gravar a sua própria cópia do prompt
+ * base junto, que é o defeito inverso do que esta montagem corrige.
  *
  * TTL DE 1 h (issue #64): os três blocos estáveis usam `ttl: '1h'` em vez dos
  * 5 min padrão. O perfil de uso é de ferramenta interna, com poucos operadores
@@ -311,24 +362,31 @@ async function buildStaticClientPrompt(effectiveClient: string | null): Promise<
  * equilíbrio de 2 para 3 leituras dentro da janela, folgado em um dia útil.
  */
 function buildSystemBlocks(input: {
-  /** Instruções fixas mais as do cliente efetivo. Vazio quando não há nenhuma. */
-  staticClientText: string
+  /** Instruções fixas globais. Iguais em toda requisição. Vazio se não houver. */
+  fixedText: string
+  /** Instruções do cliente efetivo. Variam por escopo. Vazio se não houver. */
+  clientText: string
   /** Dump de documentos do fallback. Vazio quando o RAG funcionou. */
   fallbackText: string
   /** Aviso de escopo, formato Bradesco e trechos de RAG. Muda a cada pergunta. */
   dynamicText: string
 }): Anthropic.TextBlockParam[] {
+  // Bloco 1: prompt base mais instruções fixas globais. Byte a byte igual em
+  // todos os escopos de cliente, portanto uma única entrada de cache lida por
+  // todos eles. Ver a nota acima sobre por que os dois compartilham um bloco.
+  const fixedText = input.fixedText.trim()
   const blocks: Anthropic.TextBlockParam[] = [
     {
       type: 'text',
-      text: BASE_SYSTEM_PROMPT,
+      text: fixedText ? `${BASE_SYSTEM_PROMPT}\n\n${fixedText}` : BASE_SYSTEM_PROMPT,
       cache_control: STABLE_CACHE_CONTROL,
     },
   ]
 
-  const staticClientText = input.staticClientText.trim()
-  if (staticClientText) {
-    blocks.push({ type: 'text', text: staticClientText, cache_control: STABLE_CACHE_CONTROL })
+  // Bloco 2: instruções do cliente efetivo, uma entrada de cache por escopo.
+  const clientText = input.clientText.trim()
+  if (clientText) {
+    blocks.push({ type: 'text', text: clientText, cache_control: STABLE_CACHE_CONTROL })
   }
 
   // Dump do fallback: determinístico por (escopo de cliente, docs ativos), então
@@ -460,6 +518,15 @@ export async function POST(req: NextRequest) {
         result.unshift(msgs[i])
         usedChars += msgChars
       }
+      // O corte por orçamento não olha o papel da mensagem, e a API exige que a
+      // conversa comece em `user`. O caso que quebra é rotineiro: o operador cola
+      // uma petição (acima do orçamento sozinha), recebe a classificação e faz
+      // uma pergunta curta de acompanhamento. O laço cabe a pergunta e a
+      // resposta anterior, para no corpo da petição, e devolve
+      // [assistant, user] — a requisição volta 400 e o operador vê erro genérico.
+      // Descartar as respostas do assistente órfãs no início custa contexto que
+      // já ia ser cortado de qualquer forma; a alternativa é a mensagem falhar.
+      while (result.length > 1 && result[0].role !== 'user') result.shift()
       return result
     }
 
@@ -527,10 +594,11 @@ export async function POST(req: NextRequest) {
     // Trust model: ADMIN IS TRUSTED — only authenticated admins can upload
     // documents.  Operator-submitted content (chat messages) is never injected
     // into the system prompt, only into user-role messages.
-    // Bloco estável do system: instruções fixas mais as do cliente efetivo. Só
-    // muda quando um admin altera os documentos ativos ou o cliente efetivo
-    // muda, então é ele que carrega o cache_control com TTL longo.
-    const { text: staticClientText, injectedCategories } =
+    // Blocos estáveis do system, em duas partes com estabilidades diferentes:
+    // as instruções fixas globais só mudam quando um admin edita os documentos
+    // ativos, enquanto as do cliente mudam também quando o escopo muda. São os
+    // dois que carregam o cache_control com TTL longo, em blocos separados.
+    const { fixedText, clientText, injectedCategories } =
       await buildStaticClientPrompt(effectiveClient)
 
     // FRONTEIRA DE CACHE: o que vem daqui para baixo (aviso de escopo, formato
@@ -597,6 +665,15 @@ Regras obrigatórias:
     // um bloco de system próprio com cache_control (o conteúdo é determinístico
     // por escopo de cliente + docs ativos, então o cache é reaproveitado).
     let fallbackText = ''
+    // O cap de CONTEXT_CHAR_CAP cortou documentos desta requisição. Gravado em
+    // Message porque, quando isso acontece, o modelo recebe documentação
+    // INCOMPLETA sob a instrução de exclusividade documental do prompt base
+    // ("Use APENAS essas informações"), sem nenhum sinal disso no prompt — ele
+    // não tem como saber que faltou material e responde como se o corpus
+    // estivesse inteiro. Hoje o corte só aparecia num console.warn. Sem esta
+    // coluna não há como responder a pergunta que decide o que fazer com o
+    // número 80.000: ele morde alguma vez?
+    let contextCapHit = false
 
     const queryText = lastUserMessage
 
@@ -639,19 +716,42 @@ Regras obrigatórias:
         // sem erro pelo Postgres, então isto não quebra se a instância estiver
         // com um pgvector sem HNSW. Nesse caso a migração é que falha, e falha
         // antes, que é o lugar certo.
+        // A consulta de candidatos NÃO traz `dc.content`, só o id e o que o
+        // ranqueamento precisa. O motivo é transferência de dados do banco, que é
+        // recurso cobrado e limitado à parte dos tokens: com
+        // RAG_CANDIDATE_LIMIT = 30 e chunks de 1.000 caracteres (o padrão de
+        // lib/chunking.ts), trazer o texto de todo candidato movia cerca de 30 KB
+        // por mensagem para usar no máximo 6 KB deles. O corte por
+        // RAG_MIN_SCORE e RAG_CHUNK_LIMIT acontece em JS, depois, então o
+        // over-fetch de candidatos que a issue #61 pede para o recall não precisa
+        // arrastar o texto junto: só os sobreviventes têm o conteúdo buscado, em
+        // uma segunda consulta por chave primária.
         const candidates = await prisma.$transaction(async (tx) => {
           await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${RAG_EF_SEARCH}`)
           return tx.$queryRawUnsafe<
-            Array<{ content: string; documentId: string; score: unknown; category: string; docName: string }>
+            Array<{ id: string; documentId: string; score: unknown; category: string; docName: string }>
           >(
-            `SELECT dc.content, dc."documentId",
+            // SEM teto de distância no WHERE, de propósito. Ele existia para
+            // limitar o volume trazido do banco, mas o LIMIT já faz isso e o
+            // HNSW atende `ORDER BY distância` com LIMIT, não predicado de
+            // faixa: o teto era avaliado depois da varredura, ou seja não
+            // economizava trabalho de índice. O que ele fazia era destruir o
+            // diagnóstico. Quando o teto zerava o resultado, o código emitia
+            // 'no_candidates' com ragTopScore nulo, que é a mesma assinatura de
+            // "o índice não achou nada dentro do escopo" — duas causas com
+            // correções opostas viravam o mesmo registro. Sem ele, ragTopScore
+            // passa a guardar o melhor score REAL mesmo quando é 0,12, e é esse
+            // número que diz se o piso de RAG_MIN_SCORE está apertado demais
+            // (perguntas respondíveis indo para o fallback caro) ou se o corpus
+            // simplesmente não cobre a pergunta. Nenhum token a mais chega ao
+            // modelo: o corte de relevância continua sendo o de JS abaixo.
+            `SELECT dc.id, dc."documentId",
                     1 - (dc.embedding <=> $1::vector) as score,
                     d.category, d.name as "docName"
              FROM "DocumentChunk" dc
              JOIN "Document" d ON d.id = dc."documentId"
              WHERE d.active = true
              ${clientFilter}
-             AND (dc.embedding <=> $1::vector) < ${RAG_CANDIDATE_MAX_DISTANCE}
              ORDER BY dc.embedding <=> $1::vector
              LIMIT ${RAG_CANDIDATE_LIMIT}`,
             vectorLiteral
@@ -668,14 +768,36 @@ Regras obrigatórias:
         // avgRagScore do dashboard, que só faz média sobre mensagens sem fallback.
         ragTopScore = scored.length > 0 ? scored[0].score : null
 
-        const chunks = scored
+        const ranked = scored
           .filter(c => c.score >= RAG_MIN_SCORE)
           .slice(0, RAG_CHUNK_LIMIT)
 
-        if (chunks.length === 0) {
+        if (ranked.length === 0) {
           // Separa as duas causas: sem candidato nenhum aponta para o índice ou
           // para o filtro de cliente; candidato fraco aponta para o corpus.
           throw new Error(scored.length === 0 ? 'no_candidates' : 'low_score')
+        }
+
+        // Segunda consulta, por chave primária, só para os trechos que de fato
+        // entram no prompt. Um chunk pode ter desaparecido entre as duas
+        // consultas se o documento foi apagado ou reembedado no meio da
+        // requisição: nesse caso ele sai da lista, e se não sobrar nenhum a
+        // mensagem segue para o fallback como se o índice não tivesse achado nada.
+        const contentById = new Map(
+          (
+            await prisma.documentChunk.findMany({
+              where: { id: { in: ranked.map(c => c.id) } },
+              select: { id: true, content: true },
+            })
+          ).map(row => [row.id, row.content])
+        )
+
+        const chunks = ranked
+          .map(c => ({ ...c, content: contentById.get(c.id) }))
+          .filter((c): c is typeof c & { content: string } => c.content !== undefined)
+
+        if (chunks.length === 0) {
+          throw new Error('no_candidates')
         }
 
         const clientHint = chunks
@@ -704,11 +826,21 @@ Regras obrigatórias:
         reason: ragErrorMsg,
         effectiveClient,
         sessionId: validSessionId,
-        // Candidatos devolvidos pelo índice e o melhor score entre eles. Com
-        // 'no_candidates' e candidateCount 0, suspeite do índice ou do filtro de
-        // cliente; com 'low_score' e um topScore perto de RAG_MIN_SCORE, o piso é
-        // que está apertado; com topScore muito baixo, o corpus não cobre a
-        // pergunta e o fallback está certo.
+        // Candidatos devolvidos pelo índice e o melhor score entre eles.
+        //
+        // Agora que o SQL não descarta mais candidatos por distância, os três
+        // casos são de fato distinguíveis, que era o ponto:
+        //   candidateCount 0                  -> o índice ou o filtro de cliente
+        //                                        não devolveram nada. Suspeite do
+        //                                        escopo do operador ou do corpus
+        //                                        estar vazio para esse cliente.
+        //   'low_score', topScore ~0,5        -> passou perto. O piso de
+        //                                        RAG_MIN_SCORE está apertado e
+        //                                        manda pergunta respondível para
+        //                                        o caminho caro.
+        //   'low_score', topScore muito baixo -> o corpus não cobre a pergunta.
+        //                                        O fallback está certo; o que
+        //                                        falta é documentação.
         candidateCount: ragCandidateCount,
         topScore: ragTopScore,
       }))
@@ -718,44 +850,95 @@ Regras obrigatórias:
         // pesquisaria) e exclui categorias já injetadas no bloco estático do
         // prompt — para o agibank/bradesco/cwt os docs do cliente já estão lá,
         // então reenviá-los aqui seria conteúdo 100% duplicado.
-        const documents = await prisma.document.findMany({
-          where: {
-            active: true,
-            category: fallbackCategories
-              ? { in: fallbackCategories.filter(c => !injectedCategories.has(c)) }
-              : { notIn: [...injectedCategories] },
-          },
-          orderBy: [{ order: 'asc' }, { createdAt: 'desc' }],
-          select: { name: true, content: true, category: true },
-        })
+        // Este bloco lê em duas etapas: primeiro tamanho, depois texto. O cap de
+        // CONTEXT_CHAR_CAP sempre existiu, mas era aplicado em JS depois de o
+        // `findMany` ter trazido o corpus inteiro do banco: ele limitava o prompt e
+        // não limitava um byte da transferência. Num fallback sobre um corpus de
+        // alguns MB, cada mensagem arrastava o corpus todo para montar 80 KB de
+        // contexto, e transferência é recurso cobrado e limitado à parte dos tokens.
+        // Escolhendo pelos tamanhos, a transferência passa a ser da ordem do cap.
+        const scopedCategories = fallbackCategories
+          ? fallbackCategories.filter(c => !injectedCategories.has(c))
+          : null
+        const excludedCategories = [...injectedCategories]
 
-        if (documents.length > 0) {
+        // `IN ()` e `NOT IN ()` são SQL inválido, então a lista vazia é decidida
+        // aqui: escopo vazio não casa com documento nenhum, e nada a excluir
+        // significa considerar todos.
+        const documentSizes =
+          scopedCategories?.length === 0
+            ? []
+            : await prisma.$queryRaw<
+                Array<{ id: string; name: string; category: string; len: number }>
+              >(
+                Prisma.sql`
+                  SELECT "id", "name", "category", length("content")::int AS len
+                  FROM "Document"
+                  WHERE "active" = true
+                    AND ${
+                      scopedCategories
+                        ? Prisma.sql`"category" IN (${Prisma.join(scopedCategories)})`
+                        : excludedCategories.length > 0
+                          ? Prisma.sql`"category" NOT IN (${Prisma.join(excludedCategories)})`
+                          : Prisma.sql`true`
+                    }
+                  -- "id" no fim é desempate, pelo mesmo motivo de DOC_ORDER:
+                  -- este dump vira um bloco cacheado, e ordem instável entre
+                  -- requisições faz o bloco ser gravado a 6,00 USD/1M em vez de
+                  -- lido a 0,30, sem erro nenhum aparecer.
+                  ORDER BY "order" ASC, "createdAt" DESC, "id" ASC
+                `
+              )
+
+        if (documentSizes.length > 0) {
           // Prioriza documentos do cliente efetivo para evitar que o cap de 80K chars
           // exclua o cliente relevante quando há muitos docs.
           const prioritized = effectiveClient
             ? [
-                ...documents.filter(d => d.category === effectiveClient || d.category === `instrucoes-${effectiveClient}`),
-                ...documents.filter(d => d.category !== effectiveClient && d.category !== `instrucoes-${effectiveClient}`),
+                ...documentSizes.filter(d => d.category === effectiveClient || d.category === `instrucoes-${effectiveClient}`),
+                ...documentSizes.filter(d => d.category !== effectiveClient && d.category !== `instrucoes-${effectiveClient}`),
               ]
-            : documents
+            : documentSizes
 
           let total = 0
-          const selected: typeof documents = []
+          const selected: typeof documentSizes = []
 
           for (const doc of prioritized) {
-            if (total + doc.content.length > CONTEXT_CHAR_CAP) {
-              console.warn(`[chat] Context cap reached at document "${doc.name}", skipping remaining`)
+            if (total + doc.len > CONTEXT_CHAR_CAP) {
+              contextCapHit = true
+              console.warn('[chat] Context cap reached, skipping remaining:', JSON.stringify({
+                sessionId: validSessionId,
+                effectiveClient,
+                firstSkipped: doc.name,
+                selectedChars: total,
+                skippedCount: prioritized.length - selected.length,
+              }))
               break
             }
             selected.push(doc)
-            total += doc.content.length
+            total += doc.len
           }
 
           if (selected.length > 0) {
+            // Segunda etapa: o texto, só dos documentos que couberam no cap.
+            const contentById = new Map(
+              (
+                await prisma.document.findMany({
+                  where: { id: { in: selected.map(d => d.id) } },
+                  select: { id: true, content: true },
+                })
+              ).map(row => [row.id, row.content])
+            )
+
             const docsText = selected
+              .map(doc => ({ name: doc.name, content: contentById.get(doc.id) }))
+              .filter((doc): doc is { name: string; content: string } => doc.content !== undefined)
               .map((doc, i) => `### Documento ${i + 1}: ${doc.name}\n\n${doc.content}`)
               .join('\n\n---\n\n')
-            fallbackText = `## Documentação Operacional\n\n${docsText}`
+
+            if (docsText) {
+              fallbackText = `## Documentação Operacional\n\n${docsText}`
+            }
           }
         }
       } catch {
@@ -774,6 +957,37 @@ Regras obrigatórias:
     // ReadableStream, para que uma falha de leitura de Setting apareça antes de o
     // stream começar, e não no meio dele. A função nunca lança: cai nos defaults.
     const tuning = await getChatTuning(isPetition)
+
+    // COMPOSIÇÃO DO PROMPT (instrumentação, sem efeito sobre o que o modelo lê).
+    //
+    // Cinco valores que já existem como variáveis aqui e que hoje se perdem. Sem
+    // eles, toda decisão de custo que sobra depende de alguém rodar consulta à
+    // mão contra a base, e é isso que trava a lista: o dashboard mede tokens
+    // TOTAIS por mensagem, mas não sabe de que bloco vieram, então não dá para
+    // saber se os 35 mil tokens de prefixo são instrução fixa, glossário de
+    // cliente ou dump de fallback — e cada um desses tem uma alavanca de
+    // redução diferente, com risco diferente.
+    //
+    // Custo de gravar isto: cinco colunas no mesmo INSERT que já acontece.
+    // Nenhuma chamada de API, nenhum count_tokens, nenhuma latência.
+    //
+    // São caracteres, não tokens, de propósito: contar tokens exigiria uma
+    // chamada de API por mensagem, que é exatamente o tipo de gasto que esta
+    // revisão existe para cortar. Para português a razão fica em torno de 3,5
+    // caracteres por token, o suficiente para dimensionar e comparar blocos.
+    const promptComposition = {
+      // Instruções fixas globais: a parte do prefixo compartilhada por todos os
+      // escopos. É o "F" da conta que justifica o breakpoint separado.
+      fixedChars: fixedText.length,
+      // Instruções do cliente efetivo: a parte que se multiplica por escopo.
+      clientChars: clientText.length,
+      // Dump do fallback. Zero quando o RAG funcionou.
+      fallbackChars: fallbackText.length,
+      // Histórico de fato enviado, depois do corte por HISTORY_CHAR_BUDGET.
+      historyChars: messages.reduce((sum, m) => sum + m.content.length, 0),
+      // Se o cap de 80.000 caracteres cortou documentação nesta mensagem.
+      contextCapHit,
+    }
 
     const startTime = Date.now()
     const encoder = new TextEncoder()
@@ -804,7 +1018,8 @@ Regras obrigatórias:
       async start(controller) {
         try {
           const systemBlocks = buildSystemBlocks({
-            staticClientText,
+            fixedText,
+            clientText,
             fallbackText,
             dynamicText: dynamicParts.join('\n\n'),
           })
@@ -900,8 +1115,20 @@ Regras obrigatórias:
 
           // Log interaction after streaming completes
           const responseTimeMs = Date.now() - startTime
+
+          // Tema, resolvido ANTES do insert para entrar na mesma gravação.
+          // Antes era um fire-and-forget disparado depois do insert, porque
+          // custava uma chamada ao Haiku; no modo heurístico (o padrão) isso é
+          // uma varredura de regex sobre 300 caracteres, então não há latência a
+          // esconder. Resolver antes elimina o UPDATE extra e, principalmente, a
+          // promessa não cumprida do fire-and-forget: numa função serverless nada
+          // garante que o callback rode depois de `controller.close()`, e a
+          // mensagem podia acabar sem tema por isso. Pulado para o harness de
+          // avaliação, cujos temas não interessam a ninguém (ver lib/evalMode.ts).
+          const theme = isEvalOperator(operatorName) ? null : await classifyTheme(question)
+
           try {
-            const saved = await prisma.message.create({
+            await prisma.message.create({
               data: {
                 ...(messageId ? { id: messageId } : {}),
                 question,
@@ -919,17 +1146,12 @@ Regras obrigatórias:
                 ragTopScore,
                 model: CHAT_MODEL,
                 stopReason,
+                ...(theme ? { theme } : {}),
+                ...promptComposition,
               },
               select: { id: true },
             })
             messageLogged = true
-            // Fire-and-forget theme classification — does not block the response.
-            // Pulada para o harness de avaliação: são dezenas de mensagens por
-            // rodada, cada classificação é uma chamada de Haiku, e o tema de um
-            // caso de eval não interessa a ninguém. Ver lib/evalMode.ts.
-            if (!isEvalOperator(operatorName)) {
-              classifyAndSaveTheme(saved.id, question).catch(() => {})
-            }
           } catch {
             // Do not fail the request if logging fails
           }
@@ -971,6 +1193,12 @@ Regras obrigatórias:
                   ragTopScore,
                   model: CHAT_MODEL,
                   stopReason: aborted ? 'timeout' : 'error',
+                  // A composição do prompt vale para esta linha tanto quanto para
+                  // a de sucesso: os tokens de entrada foram enviados e cobrados
+                  // mesmo com o stream interrompido. Sem isto, as mensagens que
+                  // falham sumiriam das médias por bloco e enviesariam a
+                  // comparação justamente para o lado mais caro.
+                  ...promptComposition,
                 },
                 select: { id: true },
               })

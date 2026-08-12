@@ -12,6 +12,7 @@
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "measure": "tsx scripts/measure.ts",
+    "theme:agreement": "tsx scripts/theme-agreement.ts",
     "eval": "tsx evals/run.ts",
     "eval:extract": "tsx evals/extract.ts"
   },

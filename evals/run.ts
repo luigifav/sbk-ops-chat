@@ -58,10 +58,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-/** id de linha aceito pela rota: alfanumérico com hífen e underscore, até 64. */
-function makeMessageId(caseId: string, index: number): string {
-  const safe = caseId.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 30)
-  return `eval-${index}-${safe}`
+/**
+ * id de linha aceito pela rota: alfanumérico com hífen e underscore, até 64
+ * (SESSION_ID_REGEX em app/api/chat/route.ts).
+ *
+ * O `runStamp` NÃO é decoração. Sem ele o id era determinístico por caso
+ * (`eval-3-peticao_bradesco`), e o efeito aparecia só na segunda rodada: o
+ * `prisma.message.create` da rota colidia na chave primária, o catch vazio do
+ * caminho de log engolia o erro em silêncio, e a leitura de tokens logo abaixo
+ * encontrava a linha da rodada ANTERIOR. Custo, tokens, ragFallback e latência
+ * do relatório passavam a ser os da rodada velha.
+ *
+ * O modo de falha era o pior possível para o uso a que este harness se destina:
+ * rodar um baseline com `effort: high`, depois rodar com `low` e comparar. A
+ * qualidade mudava (ela vem da resposta, que é nova) e o custo aparecia
+ * IDÊNTICO, sugerindo que baixar o effort não economiza nada. A conclusão errada
+ * saía com cara de medição.
+ */
+function makeMessageId(caseId: string, index: number, runStamp: string): string {
+  const safe = caseId.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 24)
+  const id = `eval-${runStamp}-${index}-${safe}`
+  // Cinto de segurança: a rota descarta silenciosamente um messageId que não
+  // case com o regex, e aí a linha ganha id gerado pelo banco e o harness não
+  // acha os tokens dela. Truncar aqui é preferível a perder a medição.
+  return id.slice(0, 64)
 }
 
 async function callChat(
@@ -218,6 +238,11 @@ async function main() {
   }
 
   const startedAt = new Date()
+  // Carimbo da rodada, embutido no id de cada linha de Message. Compacto
+  // (AAAAMMDDHHMMSS) para caber junto do id do caso nos 64 caracteres do regex
+  // da rota. Duas rodadas no mesmo segundo colidiriam; na prática uma rodada de
+  // 40 a 60 casos leva minutos, e o caso de uso é comparar rodadas sequenciais.
+  const runStamp = startedAt.toISOString().replace(/[-:T.Z]/g, '').slice(0, 14)
   console.log(`\nrodando ${cases.length} caso(s) contra ${baseUrl}`)
   console.log(`modelo do chat: ${CHAT_MODEL}   juiz: ${JUDGE_MODEL}`)
   console.log(`configuração: ${tuning ? JSON.stringify(tuning) : 'não lida'}\n`)
@@ -228,7 +253,7 @@ async function main() {
 
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i]
-    const messageId = makeMessageId(c.id, i)
+    const messageId = makeMessageId(c.id, i, runStamp)
     const label = `[${i + 1}/${cases.length}] ${c.id} (${c.track})`
 
     const result: CaseResult = {
